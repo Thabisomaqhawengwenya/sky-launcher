@@ -170,7 +170,12 @@ export function SettingsModal({
           </div>
 
           {loading ? (
-            <p className="hint">Loading settings...</p>
+            <div className="sheet-fields" aria-busy="true" aria-label="Loading settings">
+              <div className="skeleton-line skeleton-field-label" />
+              <div className="skeleton-box skeleton-input" />
+              <div className="skeleton-box skeleton-toggle" />
+              <div className="skeleton-box skeleton-toggle" />
+            </div>
           ) : (
             <div className="sheet-fields">
               <div className="sheet-row">

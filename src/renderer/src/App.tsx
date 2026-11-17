@@ -795,8 +795,28 @@ function App(): React.JSX.Element {
       </header>
 
       {status === null ? (
-        <main className="center-panel">
-          <p className="hint">Loading your game library...</p>
+        <main className="ps5-stage skeleton-stage" aria-busy="true" aria-label="Loading library">
+          <section className="ribbon-section">
+            <div className="ribbon-track">
+              <div className="skeleton-tile active" />
+              <div className="skeleton-tile" />
+              <div className="skeleton-tile" />
+              <div className="skeleton-tile" />
+              <div className="skeleton-tile" />
+            </div>
+            <div className="ribbon-caption">
+              <div className="skeleton-line skeleton-caption" />
+            </div>
+          </section>
+
+          <section className="hero-hub">
+            <div className="skeleton-line skeleton-title" />
+            <div className="skeleton-line skeleton-subtitle" />
+            <div className="hero-actions">
+              <div className="skeleton-pill" />
+              <div className="skeleton-circle" />
+            </div>
+          </section>
         </main>
       ) : isErrorState ? (
         <main className="center-panel" role="alert">
