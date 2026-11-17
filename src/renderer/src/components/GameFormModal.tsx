@@ -23,6 +23,7 @@ export function GameFormModal({
   onSaved
 }: GameFormModalProps): React.JSX.Element {
   const [name, setName] = useState(initialGame?.name ?? '')
+  const [sourceType, setSourceType] = useState<'exe' | 'uri'>('exe')
   const [exePath, setExePath] = useState<string | null>(null)
   const [uri, setUri] = useState('')
   const [coverPath, setCoverPath] = useState<string | null>(null)
@@ -31,20 +32,25 @@ export function GameFormModal({
   const [error, setError] = useState('')
 
   const handlePickExe = async (): Promise<void> => {
-    if (!window.api) return
+    if (!window.api) {
+      setError('File picker requires the Electron desktop window.')
+      return
+    }
     const picked = await window.api.pickExe()
     if (picked) {
       setExePath(picked)
       if (!name.trim()) {
-        const base = fileLabel(picked).replace(/\.exe$/i, '')
-        setName(base)
+        setName(fileLabel(picked).replace(/\.exe$/i, ''))
       }
       setError('')
     }
   }
 
   const handlePickCover = async (): Promise<void> => {
-    if (!window.api) return
+    if (!window.api) {
+      setError('Image picker requires the Electron desktop window.')
+      return
+    }
     const picked = await window.api.pickCover()
     if (picked) {
       setCoverPath(picked)
@@ -54,17 +60,20 @@ export function GameFormModal({
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault()
-    if (!window.api) return
+    if (!window.api) {
+      setError('Saving to games.json requires the Electron desktop window.')
+      return
+    }
 
     const trimmedName = name.trim()
     const trimmedUri = uri.trim()
 
     if (!trimmedName) {
-      setError('Enter a game name.')
+      setError('Enter a game title.')
       return
     }
     if (mode === 'add' && !exePath && !trimmedUri) {
-      setError('Choose a game .exe file or enter a Steam / Epic URI.')
+      setError('Select a game .exe file or enter a Steam / Epic launch URI.')
       return
     }
 
@@ -109,119 +118,145 @@ export function GameFormModal({
       onClick={onClose}
     >
       <form
-        className="modal-card"
+        className="console-sheet"
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => void handleSubmit(e)}
       >
-        <div className="modal-header">
-          <h2>{mode === 'add' ? 'Add game' : `Edit ${initialGame?.name ?? 'game'}`}</h2>
-          <button type="button" className="close-btn" onClick={onClose} aria-label="Close">
-            Esc / B
+        <div className="sheet-preview" style={{ ['--sheet-accent' as string]: color }}>
+          <div className="sheet-preview-tile">
+            {initialGame?.cover ? (
+              <img src={initialGame.cover} alt={name || 'Game cover'} draggable={false} />
+            ) : (
+              <div className="sheet-preview-art">
+                <svg width="44" height="44" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path
+                    d="M6.5 8.5h11a3.5 3.5 0 0 1 3.4 4.3l-.9 3.8a2.3 2.3 0 0 1-4.1.8l-1.5-2h-4.8l-1.5 2a2.3 2.3 0 0 1-4.1-.8l-.9-3.8A3.5 3.5 0 0 1 6.5 8.5Z"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                  />
+                  <path
+                    d="M8 11.5v3M6.5 13h3M15.5 12h.01M17.5 13.5h.01"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </div>
+            )}
+          </div>
+          <div className="sheet-preview-title">{name.trim() || 'Untitled Game'}</div>
+          <button
+            type="button"
+            className="sheet-cover-trigger"
+            onClick={() => void handlePickCover()}
+          >
+            {coverPath ? `Art: ${fileLabel(coverPath)}` : 'Change cover art'}
           </button>
+          {coverPath && (
+            <button type="button" className="inline-link" onClick={() => setCoverPath(null)}>
+              Reset art
+            </button>
+          )}
         </div>
 
-        <div className="form-grid">
-          <label className="field">
-            <span className="field-label">Game name</span>
-            <input
-              type="text"
-              className="text-input"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Cyberpunk 2077"
-              autoFocus
-            />
-          </label>
-
-          <div className="field">
-            <span className="field-label">
-              Game executable (.exe){mode === 'edit' ? ' (optional to replace)' : ''}
-            </span>
-            <div className="picker-row">
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => void handlePickExe()}
-              >
-                {exePath ? `Selected: ${fileLabel(exePath)}` : 'Choose .exe file'}
-              </button>
-              {exePath && (
-                <button type="button" className="inline-link" onClick={() => setExePath(null)}>
-                  Clear
-                </button>
-              )}
-            </div>
+        <div className="sheet-body">
+          <div className="modal-header">
+            <h2>{mode === 'add' ? 'Add game' : `Edit ${initialGame?.name ?? 'game'}`}</h2>
+            <button type="button" className="close-btn" onClick={onClose} aria-label="Close">
+              Esc / B
+            </button>
           </div>
 
-          <label className="field">
-            <span className="field-label">
-              Or store launch URI (steam:// or com.epicgames.launcher://)
-            </span>
-            <input
-              type="text"
-              className="text-input"
-              value={uri}
-              onChange={(e) => setUri(e.target.value)}
-              placeholder="steam://rungameid/730"
-            />
-          </label>
-
-          <div className="field">
-            <span className="field-label">Cover art (optional)</span>
-            <div className="picker-row">
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => void handlePickCover()}
-              >
-                {coverPath ? `Selected: ${fileLabel(coverPath)}` : 'Choose cover image'}
-              </button>
-              {coverPath && (
-                <button type="button" className="inline-link" onClick={() => setCoverPath(null)}>
-                  Clear
-                </button>
-              )}
-            </div>
-          </div>
-
-          <div className="field">
-            <span className="field-label">Accent colour</span>
-            <div className="swatch-row">
-              {ACCENT_PRESETS.map((preset) => (
-                <button
-                  key={preset}
-                  type="button"
-                  className={`swatch ${color === preset ? 'active' : ''}`}
-                  style={{ background: preset }}
-                  onClick={() => setColor(preset)}
-                  aria-label={`Select colour ${preset}`}
-                  aria-pressed={color === preset}
-                />
-              ))}
+          <div className="sheet-fields">
+            <label className="sheet-row">
+              <span className="sheet-label">Title</span>
               <input
-                type="color"
-                className="color-picker"
-                value={color}
-                onChange={(e) => setColor(e.target.value)}
-                aria-label="Custom accent colour"
+                type="text"
+                className="sheet-input"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Enter game title"
+                autoFocus
               />
+            </label>
+
+            <div className="sheet-row">
+              <div className="sheet-row-head">
+                <span className="sheet-label">Launch target</span>
+                <div className="segmented">
+                  <button
+                    type="button"
+                    className={`seg-btn ${sourceType === 'exe' ? 'active' : ''}`}
+                    onClick={() => setSourceType('exe')}
+                  >
+                    Local .exe
+                  </button>
+                  <button
+                    type="button"
+                    className={`seg-btn ${sourceType === 'uri' ? 'active' : ''}`}
+                    onClick={() => setSourceType('uri')}
+                  >
+                    Store URI
+                  </button>
+                </div>
+              </div>
+
+              {sourceType === 'exe' ? (
+                <div className="sheet-file-bar">
+                  <span className="sheet-file-name">
+                    {exePath ? fileLabel(exePath) : 'No executable selected'}
+                  </span>
+                  <button
+                    type="button"
+                    className="sheet-browse-btn"
+                    onClick={() => void handlePickExe()}
+                  >
+                    Browse .exe
+                  </button>
+                </div>
+              ) : (
+                <input
+                  type="text"
+                  className="sheet-input"
+                  value={uri}
+                  onChange={(e) => setUri(e.target.value)}
+                  placeholder="steam://rungameid/730"
+                />
+              )}
+            </div>
+
+            <div className="sheet-row">
+              <span className="sheet-label">Accent</span>
+              <div className="accent-bar">
+                {ACCENT_PRESETS.map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    className={`accent-chip ${color === preset ? 'active' : ''}`}
+                    style={{ background: preset }}
+                    onClick={() => setColor(preset)}
+                    aria-label={`Select colour ${preset}`}
+                    aria-pressed={color === preset}
+                  />
+                ))}
+              </div>
             </div>
           </div>
-        </div>
 
-        {error && (
-          <div className="error-banner" role="alert">
-            <span>{error}</span>
+          {error && (
+            <div className="error-banner" role="alert">
+              <span>{error}</span>
+            </div>
+          )}
+
+          <div className="sheet-footer">
+            <button type="submit" className="btn btn-primary" disabled={saving}>
+              {saving ? 'Saving...' : mode === 'add' ? 'Add to library' : 'Save changes'}
+            </button>
+            <button type="button" className="btn btn-secondary" onClick={onClose}>
+              Cancel
+            </button>
           </div>
-        )}
-
-        <div className="action-row">
-          <button type="submit" className="btn btn-primary" disabled={saving}>
-            {saving ? 'Saving...' : mode === 'add' ? 'Add to library' : 'Save changes'}
-          </button>
-          <button type="button" className="btn btn-secondary" onClick={onClose}>
-            Cancel
-          </button>
         </div>
       </form>
     </div>

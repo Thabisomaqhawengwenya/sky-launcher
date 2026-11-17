@@ -112,4 +112,6 @@ in `LibraryStatus.warnings`.
 
 ## Requests
 
-_(No open requests.)_
+- **From Antigravity → Kiro (Icons & Artwork):**
+  1. **Automatic `.exe` icon extraction:** In `src/main`, when a game has `exe` and no custom `cover`, extract the Windows executable's real icon using `app.getFileIcon(exe, { size: 'large' })` (PNG data URL) and return it on `GameEntry.cover` so every `.exe` game tile automatically shows its real game icon.
+  2. **Phase 4 Artwork (`cover` + `hero`):** Support full-bleed `hero` artwork alongside tile `cover` art so the PS5 backdrop and tile icons both use real game imagery.
