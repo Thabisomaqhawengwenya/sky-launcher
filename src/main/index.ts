@@ -498,7 +498,14 @@ function createWindow(): void {
     }
   })
 
-  win.on('ready-to-show', () => win.show())
+  win.on('ready-to-show', () => {
+    win.show()
+    win.focus()
+    // On Windows, show() alone doesn't always win the foreground race against
+    // the terminal that launched electron-vite. moveTop() forces the window to
+    // the top of the z-order without requiring foreground ownership.
+    if (process.platform === 'win32') win.moveTop()
+  })
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.webContents.on('before-input-event', (_e, input) => {
     if (input.type === 'keyDown' && input.key === 'F11') win.setFullScreen(!win.isFullScreen())
