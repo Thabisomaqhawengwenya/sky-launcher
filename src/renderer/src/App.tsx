@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { GameEntry, LibraryStatus } from '../../preload/index.d'
+import type { GameEntry, LibraryStatus, PlaytimeMap } from '../../preload/index.d'
 import { GameFormModal } from './components/GameFormModal'
 import { ScanModal } from './components/ScanModal'
+import { SettingsModal } from './components/SettingsModal'
 
-type ActiveModal = 'none' | 'library' | 'game-options' | 'add' | 'edit' | 'scan'
+type ActiveModal = 'none' | 'settings' | 'game-options' | 'add' | 'edit' | 'scan'
+type LibraryFilter = 'all' | 'recent' | 'favorites'
+
+const FAV_STORAGE_KEY = 'sky_launcher_favorites_v1'
+const SOUND_STORAGE_KEY = 'sky_launcher_sound_v1'
 
 function getRibbonMetrics(width: number): {
   activeTile: number
@@ -47,11 +52,92 @@ const BROWSER_DEMO_GAMES: GameEntry[] = [
   }
 ]
 
+function formatDuration(totalMs: number): string {
+  const mins = Math.floor(totalMs / 60_000)
+  if (mins < 1) return 'Less than 1 min'
+  if (mins < 60) return `${mins} min`
+  const hrs = totalMs / 3_600_000
+  return `${hrs.toFixed(1)} hrs`
+}
+
+function formatLastPlayed(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  const now = new Date()
+  const diffDays = Math.floor((now.getTime() - date.getTime()) / 86_400_000)
+  if (diffDays <= 0) return 'Today'
+  if (diffDays === 1) return 'Yesterday'
+  if (diffDays < 7) return `${diffDays} days ago`
+  return date.toLocaleDateString()
+}
+
+function playUiSound(type: 'move' | 'confirm', enabled: boolean): void {
+  if (!enabled || typeof window === 'undefined') return
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  try {
+    const AudioCtx = window.AudioContext
+    if (!AudioCtx) return
+    const ctx = new AudioCtx()
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.type = 'sine'
+    const now = ctx.currentTime
+    if (type === 'move') {
+      osc.frequency.setValueAtTime(520, now)
+      osc.frequency.exponentialRampToValueAtTime(340, now + 0.045)
+      gain.gain.setValueAtTime(0.035, now)
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05)
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      osc.start(now)
+      osc.stop(now + 0.055)
+    } else {
+      osc.frequency.setValueAtTime(480, now)
+      osc.frequency.exponentialRampToValueAtTime(760, now + 0.09)
+      gain.gain.setValueAtTime(0.05, now)
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.11)
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      osc.start(now)
+      osc.stop(now + 0.12)
+    }
+    osc.onended = () => {
+      void ctx.close()
+    }
+  } catch {
+    // Ignore audio errors when autoplay is blocked
+  }
+}
+
+function loadFavorites(): string[] {
+  try {
+    const raw = localStorage.getItem(FAV_STORAGE_KEY)
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+
 function App(): React.JSX.Element {
   const isElectron = typeof window !== 'undefined' && Boolean(window.api)
   const [status, setStatus] = useState<LibraryStatus | null>(null)
+  const [playtime, setPlaytime] = useState<PlaytimeMap>({})
+  const [filter, setFilter] = useState<LibraryFilter>('all')
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [favorites, setFavorites] = useState<string[]>(() => loadFavorites())
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SOUND_STORAGE_KEY) !== 'false'
+    } catch {
+      return true
+    }
+  })
+
   const [index, setIndex] = useState(0)
   const [launchError, setLaunchError] = useState('')
+  const [fetchingArt, setFetchingArt] = useState(false)
   const [launching, setLaunching] = useState(false)
   const [activeModal, setActiveModal] = useState<ActiveModal>('none')
   const [confirmRemove, setConfirmRemove] = useState(false)
@@ -60,29 +146,78 @@ function App(): React.JSX.Element {
   const [time, setTime] = useState(() => new Date())
   const [metrics, setMetrics] = useState(() => getRibbonMetrics(window.innerWidth))
 
-  const games = useMemo(() => status?.games ?? [], [status])
+  const searchInputRef = useRef<HTMLInputElement>(null)
+
+  const allGames = useMemo(() => status?.games ?? [], [status])
   const warnings = status?.warnings ?? []
 
+  const visibleGames = useMemo(() => {
+    let list = allGames
+    if (filter === 'favorites') {
+      const favSet = new Set(favorites)
+      list = list.filter((g) => favSet.has(g.id))
+    } else if (filter === 'recent') {
+      list = [...list]
+        .filter((g) => Boolean(playtime[g.id]?.lastPlayed))
+        .sort((a, b) => {
+          const ta = Date.parse(playtime[a.id]?.lastPlayed ?? '') || 0
+          const tb = Date.parse(playtime[b.id]?.lastPlayed ?? '') || 0
+          return tb - ta
+        })
+    }
+
+    const q = searchQuery.trim().toLowerCase()
+    if (q) {
+      list = list.filter((g) => g.name.toLowerCase().includes(q))
+    }
+    return list
+  }, [allGames, filter, favorites, playtime, searchQuery])
+
+  const clampedIndex = Math.min(index, Math.max(visibleGames.length - 1, 0))
+
   const latest = useRef({
-    games,
-    index,
+    games: visibleGames,
+    index: clampedIndex,
     activeModal,
     modalActionIndex,
     launchError,
-    statusOk: status?.ok ?? true
+    statusOk: status?.ok ?? true,
+    soundEnabled,
+    searchOpen
   })
   useEffect(() => {
     latest.current = {
-      games,
-      index,
+      games: visibleGames,
+      index: clampedIndex,
       activeModal,
       modalActionIndex,
       launchError,
-      statusOk: status?.ok ?? true
+      statusOk: status?.ok ?? true,
+      soundEnabled,
+      searchOpen
     }
-  }, [games, index, activeModal, modalActionIndex, launchError, status?.ok])
+  }, [
+    visibleGames,
+    clampedIndex,
+    activeModal,
+    modalActionIndex,
+    launchError,
+    status?.ok,
+    soundEnabled,
+    searchOpen
+  ])
 
   const busy = useRef(false)
+
+  const refreshPlaytime = useCallback(async () => {
+    if (!window.api) return
+    try {
+      const pt = await window.api.getAllPlaytime()
+      setPlaytime(pt)
+    } catch {
+      // Ignore playtime read errors
+    }
+  }, [])
 
   const loadLibrary = useCallback(async (focusGameId?: string) => {
     if (!window.api) {
@@ -96,11 +231,17 @@ function App(): React.JSX.Element {
       return
     }
     try {
-      const next = await window.api.getStatus()
+      const [next, pt] = await Promise.all([
+        window.api.getStatus(),
+        window.api.getAllPlaytime().catch(() => ({}))
+      ])
       setStatus(next)
+      setPlaytime(pt)
       if (focusGameId) {
         const found = next.games.findIndex((g) => g.id === focusGameId)
         if (found >= 0) {
+          setFilter('all')
+          setSearchQuery('')
           setIndex(found)
           return
         }
@@ -118,20 +259,27 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     let active = true
-    const fetchStatus = window.api
-      ? window.api.getStatus()
-      : Promise.resolve<LibraryStatus>({
-          ok: false,
-          games: [],
-          error:
-            'You are viewing the Vite web preview in a browser. Switch to the Sky Launcher Electron desktop window to scan your laptop, open games.json, and launch games.',
-          warnings: []
-        })
+    const fetchInitial = window.api
+      ? Promise.all([
+          window.api.getStatus(),
+          window.api.getAllPlaytime().catch(() => ({}) as PlaytimeMap)
+        ])
+      : Promise.resolve<[LibraryStatus, PlaytimeMap]>([
+          {
+            ok: false,
+            games: [],
+            error:
+              'You are viewing the Vite web preview in a browser. Switch to the Sky Launcher Electron desktop window to scan your laptop, open games.json, and launch games.',
+            warnings: []
+          },
+          {}
+        ])
 
-    fetchStatus
-      .then((next) => {
+    fetchInitial
+      .then(([next, pt]) => {
         if (!active) return
         setStatus(next)
+        setPlaytime(pt)
         setIndex((i) => Math.min(i, Math.max(next.games.length - 1, 0)))
       })
       .catch(() => {
@@ -143,15 +291,21 @@ function App(): React.JSX.Element {
           warnings: []
         })
       })
+
+    const onFocus = (): void => {
+      void refreshPlaytime()
+    }
     const timer = setInterval(() => setTime(new Date()), 30_000)
     const onResize = (): void => setMetrics(getRibbonMetrics(window.innerWidth))
+    window.addEventListener('focus', onFocus)
     window.addEventListener('resize', onResize)
     return () => {
       active = false
       clearInterval(timer)
+      window.removeEventListener('focus', onFocus)
       window.removeEventListener('resize', onResize)
     }
-  }, [])
+  }, [refreshPlaytime])
 
   useEffect(() => {
     const syncPads = (): void => {
@@ -173,15 +327,41 @@ function App(): React.JSX.Element {
     setModalActionIndex(0)
   }, [])
 
+  const toggleFavorite = useCallback((id: string) => {
+    setFavorites((prev) => {
+      const exists = prev.includes(id)
+      const next = exists ? prev.filter((item) => item !== id) : [...prev, id]
+      try {
+        localStorage.setItem(FAV_STORAGE_KEY, JSON.stringify(next))
+      } catch {
+        // Ignore storage errors
+      }
+      return next
+    })
+  }, [])
+
+  const handleToggleSound = useCallback((enabled: boolean) => {
+    setSoundEnabled(enabled)
+    try {
+      localStorage.setItem(SOUND_STORAGE_KEY, String(enabled))
+    } catch {
+      // Ignore storage errors
+    }
+  }, [])
+
   const move = useCallback((dir: number) => {
-    const { activeModal: modal, games: list, statusOk } = latest.current
+    const { activeModal: modal, games: list, statusOk, soundEnabled: sfx } = latest.current
     if (modal !== 'none' || !statusOk || list.length === 0) {
       setModalActionIndex((prev) => (prev + dir + 2) % 2)
       return
     }
     const last = Math.max(list.length - 1, 0)
     setLaunchError('')
-    setIndex((i) => Math.min(Math.max(i + dir, 0), last))
+    setIndex((i) => {
+      const next = Math.min(Math.max(i + dir, 0), last)
+      if (next !== i) playUiSound('move', sfx)
+      return next
+    })
   }, [])
 
   const launch = useCallback(async () => {
@@ -194,12 +374,15 @@ function App(): React.JSX.Element {
     busy.current = true
     setLaunching(true)
     setLaunchError('')
+    playUiSound('confirm', latest.current.soundEnabled)
     try {
       const res = await window.api.launchGame(game.id)
       if (!res.ok) {
         setLaunchError(
           res.error ?? 'Could not start this game. Check its path or URI in games.json.'
         )
+      } else {
+        void refreshPlaytime()
       }
     } catch {
       setLaunchError('Could not start this game. Check its path or URI in games.json.')
@@ -209,7 +392,34 @@ function App(): React.JSX.Element {
         setLaunching(false)
       }, 1200)
     }
-  }, [])
+  }, [refreshPlaytime])
+
+  const fetchSelectedArt = useCallback(async () => {
+    const game = latest.current.games[latest.current.index]
+    if (!game) return
+    if (!window.api) {
+      setLaunchError('Fetching SteamGridDB artwork requires the Electron desktop window.')
+      closeModal()
+      return
+    }
+    setFetchingArt(true)
+    setLaunchError('')
+    try {
+      const res = await window.api.fetchArt(game.id)
+      if (!res.ok) {
+        setLaunchError(
+          res.error ?? 'Could not fetch artwork. Add a SteamGridDB API key in Settings.'
+        )
+      } else {
+        await loadLibrary(game.id)
+      }
+    } catch {
+      setLaunchError('Could not fetch artwork from SteamGridDB.')
+    } finally {
+      setFetchingArt(false)
+      closeModal()
+    }
+  }, [closeModal, loadLibrary])
 
   const revealSelectedGame = useCallback(async () => {
     const game = latest.current.games[latest.current.index]
@@ -266,7 +476,7 @@ function App(): React.JSX.Element {
 
   const handleConfirm = useCallback(() => {
     const { activeModal: modal, statusOk, games: list } = latest.current
-    if (modal === 'library' || !statusOk || list.length === 0) {
+    if (!statusOk || list.length === 0) {
       activateModalAction()
       return
     }
@@ -280,6 +490,11 @@ function App(): React.JSX.Element {
       closeModal()
       return
     }
+    if (latest.current.searchOpen) {
+      setSearchOpen(false)
+      setSearchQuery('')
+      return
+    }
     if (latest.current.launchError) {
       setLaunchError('')
     }
@@ -290,7 +505,7 @@ function App(): React.JSX.Element {
     setModalActionIndex(0)
     setActiveModal((prev) => {
       if (prev !== 'none') return 'none'
-      return latest.current.games.length > 0 ? 'game-options' : 'library'
+      return latest.current.games.length > 0 ? 'game-options' : 'settings'
     })
   }, [])
 
@@ -301,7 +516,11 @@ function App(): React.JSX.Element {
       const inInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
 
       if (e.key === 'Escape') {
-        if (latest.current.activeModal !== 'none' || latest.current.launchError) {
+        if (
+          latest.current.activeModal !== 'none' ||
+          latest.current.searchOpen ||
+          latest.current.launchError
+        ) {
           e.preventDefault()
           handleBack()
         }
@@ -310,7 +529,11 @@ function App(): React.JSX.Element {
 
       if (inInput) return
 
-      if (e.key === 'ArrowRight') {
+      if (e.key === '/') {
+        e.preventDefault()
+        setSearchOpen(true)
+        setTimeout(() => searchInputRef.current?.focus(), 0)
+      } else if (e.key === 'ArrowRight') {
         e.preventDefault()
         move(1)
       } else if (e.key === 'ArrowLeft') {
@@ -329,11 +552,14 @@ function App(): React.JSX.Element {
       } else if (e.key === 'r' || e.key === 'R') {
         e.preventDefault()
         void loadLibrary()
+      } else if (e.key === 'f' || e.key === 'F') {
+        const g = latest.current.games[latest.current.index]
+        if (g) toggleFavorite(g.id)
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [move, handleConfirm, handleBack, toggleOptions, loadLibrary])
+  }, [move, handleConfirm, handleBack, toggleOptions, loadLibrary, toggleFavorite])
 
   // Gamepad navigation: D-pad/left stick move, A (0) select, B (1) back, Y (3) options
   useEffect(() => {
@@ -373,12 +599,17 @@ function App(): React.JSX.Element {
     return () => cancelAnimationFrame(raf)
   }, [move, handleConfirm, handleBack, toggleOptions])
 
-  const game = games[index]
+  const game = visibleGames[clampedIndex]
+  const backdropArt = game?.hero ?? game?.cover
+  const gamePlayRecord = game ? playtime[game.id] : undefined
+  const isFavorite = game ? favorites.includes(game.id) : false
   const accent = game?.color ?? '#2f6bff'
   const clock = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
   const isErrorState = status !== null && !status.ok
-  const isEmptyState = status !== null && status.ok && games.length === 0
-  const ribbonShift = index * (metrics.idleTile + metrics.gap)
+  const isEmptyLibrary = status !== null && status.ok && allGames.length === 0
+  const isEmptyFiltered =
+    status !== null && status.ok && allGames.length > 0 && visibleGames.length === 0
+  const ribbonShift = clampedIndex * (metrics.idleTile + metrics.gap)
 
   return (
     <div
@@ -390,30 +621,107 @@ function App(): React.JSX.Element {
         ['--tile-gap' as string]: `${metrics.gap}px`
       }}
     >
-      {/* Full-bleed atmospheric backdrop */}
+      {/* Full-bleed atmospheric backdrop (prefers wide hero art) */}
       <div
         key={game?.id ?? 'none'}
-        className={`backdrop ${game?.cover ? 'has-cover' : ''}`}
-        style={game?.cover ? { backgroundImage: `url("${game.cover}")` } : undefined}
+        className={`backdrop ${backdropArt ? (game?.hero ? 'has-hero' : 'has-cover') : ''}`}
+        style={backdropArt ? { backgroundImage: `url("${backdropArt}")` } : undefined}
       />
       <div className="backdrop-vignette" />
       <div className="accent-glow" />
 
       {/* PS5-style Top Bar */}
       <header className="topbar">
-        <nav className="nav-tabs" aria-label="Primary">
-          <span className="nav-tab active">Games</span>
+        <nav className="nav-tabs" aria-label="Library filters">
+          <button
+            type="button"
+            className={`nav-tab-btn ${filter === 'all' ? 'active' : ''}`}
+            onClick={() => {
+              setFilter('all')
+              setIndex(0)
+            }}
+          >
+            Games
+          </button>
+          <button
+            type="button"
+            className={`nav-tab-btn ${filter === 'recent' ? 'active' : ''}`}
+            onClick={() => {
+              setFilter('recent')
+              setIndex(0)
+            }}
+          >
+            Recent
+          </button>
+          <button
+            type="button"
+            className={`nav-tab-btn ${filter === 'favorites' ? 'active' : ''}`}
+            onClick={() => {
+              setFilter('favorites')
+              setIndex(0)
+            }}
+          >
+            Favourites
+          </button>
           <span className="nav-count">
-            {games.length} {games.length === 1 ? 'title' : 'titles'}
+            {visibleGames.length} {visibleGames.length === 1 ? 'title' : 'titles'}
           </span>
         </nav>
 
         <div className="status-group">
+          {searchOpen ? (
+            <div className="search-bar">
+              <input
+                ref={searchInputRef}
+                type="text"
+                className="search-input"
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value)
+                  setIndex(0)
+                }}
+                placeholder="Search games..."
+                aria-label="Search games"
+              />
+              <button
+                type="button"
+                className="inline-link"
+                onClick={() => {
+                  setSearchOpen(false)
+                  setSearchQuery('')
+                }}
+              >
+                Clear
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => {
+                setSearchOpen(true)
+                setTimeout(() => searchInputRef.current?.focus(), 0)
+              }}
+              title="Search games (/)"
+              aria-label="Search games"
+            >
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="1.9" />
+                <path
+                  d="m20 20-3.5-3.5"
+                  stroke="currentColor"
+                  strokeWidth="1.9"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </button>
+          )}
+
           {warnings.length > 0 && (
             <button
               type="button"
               className="warning-chip"
-              onClick={() => setActiveModal('library')}
+              onClick={() => setActiveModal('settings')}
               title="View skipped entries from games.json"
             >
               <span className="warning-dot" />
@@ -468,9 +776,9 @@ function App(): React.JSX.Element {
           <button
             type="button"
             className="icon-btn"
-            onClick={() => setActiveModal('library')}
-            title="Library & Warnings"
-            aria-label="Library and warnings"
+            onClick={() => setActiveModal('settings')}
+            title="Settings & Library"
+            aria-label="Settings and library"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
@@ -540,7 +848,7 @@ function App(): React.JSX.Element {
             </div>
           </div>
         </main>
-      ) : isEmptyState ? (
+      ) : isEmptyLibrary ? (
         <main className="center-panel">
           <div className="state-card">
             <span className="state-badge">Empty library</span>
@@ -575,20 +883,54 @@ function App(): React.JSX.Element {
             </div>
           </div>
         </main>
+      ) : isEmptyFiltered ? (
+        <main className="center-panel">
+          <div className="state-card">
+            <span className="state-badge">No matches</span>
+            <h1>No games match this filter</h1>
+            <p className="state-copy">
+              {filter === 'favorites'
+                ? 'Press F or open Game Options to mark a game as a favourite.'
+                : filter === 'recent'
+                  ? 'Launch a game to see it in your Recently Played list.'
+                  : 'Clear your search query to see all games in your library.'}
+            </p>
+            <div className="action-row">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  setFilter('all')
+                  setSearchQuery('')
+                  setSearchOpen(false)
+                }}
+              >
+                Show all games
+              </button>
+            </div>
+          </div>
+        </main>
       ) : (
         <main className="ps5-stage">
           {/* Upper-Left PS5 Game Ribbon */}
           <section className="ribbon-section" aria-label="Game library">
             <div className="ribbon-viewport">
               <div className="ribbon-track" style={{ transform: `translateX(-${ribbonShift}px)` }}>
-                {games.map((g, i) => {
-                  const isActive = i === index
+                {visibleGames.map((g, i) => {
+                  const isActive = i === clampedIndex
                   return (
                     <button
                       key={g.id}
                       type="button"
                       className={`ribbon-tile ${isActive ? 'active' : ''}`}
-                      onClick={() => (isActive ? void launch() : setIndex(i))}
+                      onClick={() => {
+                        if (isActive) {
+                          void launch()
+                        } else {
+                          playUiSound('move', soundEnabled)
+                          setIndex(i)
+                        }
+                      }}
                       aria-label={g.name}
                       aria-pressed={isActive}
                     >
@@ -666,7 +1008,12 @@ function App(): React.JSX.Element {
                 </button>
               </div>
             ) : (
-              <p className="hero-subtitle">Press Enter or A to start</p>
+              <p className="hero-subtitle">
+                {gamePlayRecord
+                  ? `${formatDuration(gamePlayRecord.totalMs)} played · Last played ${formatLastPlayed(gamePlayRecord.lastPlayed)}`
+                  : 'Press Enter or A to start'}
+                {isFavorite ? ' · Favourite' : ''}
+              </p>
             )}
 
             <div className="hero-actions">
@@ -707,7 +1054,10 @@ function App(): React.JSX.Element {
           <kbd>Y</kbd> Options
         </span>
         <span>
-          <kbd>R</kbd> Reload
+          <kbd>F</kbd> Favourite
+        </span>
+        <span>
+          <kbd>/</kbd> Search
         </span>
         <span>
           <kbd>F11</kbd> Fullscreen
@@ -731,7 +1081,11 @@ function App(): React.JSX.Element {
               </button>
             </div>
 
-            <p className="modal-subtitle">Manage this game or open its install folder.</p>
+            <p className="modal-subtitle">
+              {gamePlayRecord
+                ? `${formatDuration(gamePlayRecord.totalMs)} played · Last played ${formatLastPlayed(gamePlayRecord.lastPlayed)}`
+                : 'Manage this game, artwork, or install folder.'}
+            </p>
 
             <div className="options-stack">
               <button
@@ -746,10 +1100,29 @@ function App(): React.JSX.Element {
               <button
                 type="button"
                 className="option-row-btn"
+                onClick={() => void fetchSelectedArt()}
+                disabled={fetchingArt}
+              >
+                <span>{fetchingArt ? 'Fetching artwork...' : 'Fetch cover & hero art'}</span>
+                <span className="option-hint">SteamGridDB</span>
+              </button>
+
+              <button
+                type="button"
+                className="option-row-btn"
+                onClick={() => toggleFavorite(game.id)}
+              >
+                <span>{isFavorite ? 'Remove from Favourites' : 'Add to Favourites'}</span>
+                <span className="option-hint">Shortcut: F</span>
+              </button>
+
+              <button
+                type="button"
+                className="option-row-btn"
                 onClick={() => setActiveModal('edit')}
               >
                 <span>Edit game details</span>
-                <span className="option-hint">Name, .exe, cover, colour</span>
+                <span className="option-hint">Title, target, cover, accent</span>
               </button>
 
               {!confirmRemove ? (
@@ -787,74 +1160,16 @@ function App(): React.JSX.Element {
         </div>
       )}
 
-      {/* Library & Warnings Modal */}
-      {activeModal === 'library' && (
-        <div
-          className="modal-backdrop"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Library and warnings"
-          onClick={closeModal}
-        >
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h2>Library &amp; Warnings</h2>
-              <button type="button" className="close-btn" onClick={closeModal} aria-label="Close">
-                Esc / B
-              </button>
-            </div>
-
-            <p className="modal-subtitle">
-              Games are read from <code>games.json</code> in your app data folder.
-            </p>
-
-            {warnings.length > 0 ? (
-              <div className="warnings-box">
-                <h3>Skipped entries ({warnings.length})</h3>
-                <ul>
-                  {warnings.map((w, i) => (
-                    <li key={i}>{w}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : (
-              <div className="ok-box">
-                All entries in <code>games.json</code> passed validation.
-              </div>
-            )}
-
-            <div className="action-row">
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => setActiveModal('scan')}
-              >
-                Scan laptop
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => setActiveModal('add')}
-              >
-                + Add game
-              </button>
-              <button
-                type="button"
-                className={`btn btn-secondary ${modalActionIndex === 0 ? 'focused' : ''}`}
-                onClick={() => void openGamesFile()}
-              >
-                Open games.json
-              </button>
-              <button
-                type="button"
-                className={`btn btn-secondary ${modalActionIndex === 1 ? 'focused' : ''}`}
-                onClick={() => void loadLibrary()}
-              >
-                Reload
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* Settings & Library Modal */}
+      {activeModal === 'settings' && (
+        <SettingsModal
+          warnings={warnings}
+          soundEnabled={soundEnabled}
+          onToggleSound={handleToggleSound}
+          onOpenGamesFile={openGamesFile}
+          onReloadLibrary={loadLibrary}
+          onClose={closeModal}
+        />
       )}
 
       {/* Add / Edit Game Modal */}
@@ -873,7 +1188,7 @@ function App(): React.JSX.Element {
       {/* Scan Laptop Modal */}
       {activeModal === 'scan' && (
         <ScanModal
-          existingNames={games.map((g) => g.name)}
+          existingNames={allGames.map((g) => g.name)}
           onClose={closeModal}
           onImported={async () => {
             await loadLibrary()

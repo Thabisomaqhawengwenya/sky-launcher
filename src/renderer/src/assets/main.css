@@ -54,6 +54,11 @@ body {
   filter: blur(2px) brightness(0.76) saturate(1.12);
 }
 
+.backdrop.has-hero {
+  filter: brightness(0.84) saturate(1.08);
+  background-position: 62% center;
+}
+
 .backdrop-vignette {
   position: absolute;
   inset: 0;
@@ -104,16 +109,46 @@ body {
   gap: 24px;
 }
 
-.nav-tab {
-  font-size: 22px;
+.nav-tab-btn {
+  border: 0;
+  background: transparent;
+  padding: 2px 0;
+  font: inherit;
+  font-size: 21px;
   font-weight: 400;
-  color: rgba(244, 246, 251, 0.52);
+  color: rgba(244, 246, 251, 0.5);
   letter-spacing: -0.01em;
+  cursor: pointer;
+  transition: color 0.16s ease;
 }
 
-.nav-tab.active {
+.nav-tab-btn:hover {
+  color: rgba(244, 246, 251, 0.85);
+}
+
+.nav-tab-btn.active {
   font-weight: 700;
   color: #ffffff;
+}
+
+.search-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 4px 12px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.search-input {
+  width: 170px;
+  border: 0;
+  background: transparent;
+  color: #f4f6fb;
+  font: inherit;
+  font-size: 13px;
+  outline: none;
 }
 
 .nav-count {
@@ -938,6 +973,76 @@ button:focus-visible,
   align-items: center;
   gap: 12px;
   padding-top: 6px;
+}
+
+/* Settings Sheet */
+.settings-aside {
+  text-align: center;
+}
+
+.settings-aside-icon {
+  width: 68px;
+  height: 68px;
+  border-radius: 18px;
+  display: grid;
+  place-items: center;
+  background: rgba(47, 107, 255, 0.18);
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  color: #e2e8f0;
+}
+
+.settings-aside-copy {
+  font-size: 13px;
+  line-height: 1.45;
+  color: #9aa6c1;
+}
+
+.settings-aside-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.settings-aside-status {
+  font-size: 12px;
+  color: #a7f3d0;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  cursor: pointer;
+}
+
+.toggle-row > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.toggle-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #f4f6fb;
+}
+
+.toggle-sub {
+  font-size: 12px;
+  color: #9aa6c1;
+}
+
+.toggle-row input[type='checkbox'] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 /* Scan Results */
