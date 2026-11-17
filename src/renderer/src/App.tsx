@@ -36,38 +36,6 @@ function getRibbonMetrics(width: number): {
   return { activeTile: 96, idleTile: 72, gap: 10 }
 }
 
-function makeDemoCover(bg1: string, bg2: string, accent: string, title: string): string {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="${bg1}"/><stop offset="100%" stop-color="${bg2}"/></linearGradient><radialGradient id="a" cx="72%" cy="35%" r="55%"><stop offset="0%" stop-color="${accent}" stop-opacity="0.75"/><stop offset="100%" stop-color="${accent}" stop-opacity="0"/></radialGradient></defs><rect width="800" height="450" fill="url(#g)"/><rect width="800" height="450" fill="url(#a)"/><circle cx="590" cy="180" r="130" fill="${accent}" fill-opacity="0.18"/><path d="M470 350 L620 110 L760 350 Z" fill="#ffffff" fill-opacity="0.06"/><text x="60" y="385" fill="#ffffff" fill-opacity="0.22" font-family="Segoe UI, sans-serif" font-size="44" font-weight="800">${title}</text></svg>`
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`
-}
-
-const BROWSER_DEMO_GAMES: GameEntry[] = [
-  {
-    id: 'demo-spider',
-    name: "Marvel's Spider-Man",
-    color: '#ef4444',
-    cover: makeDemoCover('#0f172a', '#2b0912', '#ef4444', 'SPIDER-MAN')
-  },
-  {
-    id: 'demo-cs2',
-    name: 'Counter-Strike 2',
-    color: '#e67e22',
-    cover: makeDemoCover('#111827', '#2c1808', '#f59e0b', 'COUNTER-STRIKE 2')
-  },
-  {
-    id: 'demo-cyberpunk',
-    name: 'Cyberpunk 2077',
-    color: '#eab308',
-    cover: makeDemoCover('#091326', '#292205', '#eab308', 'CYBERPUNK 2077')
-  },
-  {
-    id: 'demo-elden',
-    name: 'Elden Ring',
-    color: '#10b981',
-    cover: makeDemoCover('#081715', '#152510', '#10b981', 'ELDEN RING')
-  }
-]
-
 function formatDuration(totalMs: number): string {
   const mins = Math.floor(totalMs / 60_000)
   if (mins < 1) return 'Less than 1 min'
@@ -903,7 +871,7 @@ function App(): React.JSX.Element {
               {status.error ?? 'Open games.json to fix the formatting, then reload your library.'}
             </p>
             <div className="action-row">
-              {isElectron ? (
+              {isElectron && (
                 <>
                   <button
                     type="button"
@@ -920,20 +888,6 @@ function App(): React.JSX.Element {
                     Reload library
                   </button>
                 </>
-              ) : (
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={() =>
-                    setStatus({
-                      ok: true,
-                      games: BROWSER_DEMO_GAMES,
-                      warnings: []
-                    })
-                  }
-                >
-                  Preview PS5 UI with demo games
-                </button>
               )}
             </div>
           </div>
