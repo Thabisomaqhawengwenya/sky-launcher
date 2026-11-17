@@ -24,7 +24,19 @@ const api = {
 
   // ── Scanning ──────────────────────────────────────────────────────────────
   scanStores: () => ipcRenderer.invoke('games:scan'),
-  scanFolder: (folderPath: string) => ipcRenderer.invoke('games:scan-folder', folderPath)
+  scanFolder: (folderPath: string) => ipcRenderer.invoke('games:scan-folder', folderPath),
+
+  // ── Settings ──────────────────────────────────────────────────────────────
+  getSettings: () => ipcRenderer.invoke('settings:get'),
+  setSettings: (patch: object) => ipcRenderer.invoke('settings:set', patch),
+
+  // ── Cover art ─────────────────────────────────────────────────────────────
+  fetchArt: (id: string) => ipcRenderer.invoke('games:fetch-art', id),
+  fetchArtAll: () => ipcRenderer.invoke('games:fetch-art-all'),
+
+  // ── Play time ─────────────────────────────────────────────────────────────
+  getPlaytime: (id: string) => ipcRenderer.invoke('playtime:get', id),
+  getAllPlaytime: () => ipcRenderer.invoke('playtime:get-all')
 }
 
 contextBridge.exposeInMainWorld('electron', electronAPI)

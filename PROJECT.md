@@ -44,6 +44,52 @@ laptop and only launches them. Electron + React + TypeScript (electron-vite reac
 
 ## Current status
 
+### Phases 4–7 — complete (backend)
+
+#### Phase 4 — Cover art (SteamGridDB)
+
+| Method | Returns | Notes |
+|--------|---------|-------|
+| `fetchArt(id)` | `Promise<WriteResult>` | Fetches grid + hero from SteamGridDB for one game, caches to `%APPDATA%\game-launcher\art-cache\`. Requires `steamGridDbApiKey` in settings. |
+| `fetchArtAll()` | `Promise<{ ok, queued }>` | Queues background art fetch for every game with no cached art. Returns immediately — reload library after a delay. |
+
+`GameEntry` now has a `hero?: string` field (wide landscape data URL for the backdrop) alongside `cover`.
+
+**Cover priority per game:** user-set cover image → SteamGridDB grid cache → extracted exe icon → no art.
+
+#### Phase 5 — Play time
+
+| Method | Returns | Notes |
+|--------|---------|-------|
+| `getPlaytime(id)` | `Promise<PlayRecord \| null>` | Record for one game. `null` if never launched. |
+| `getAllPlaytime()` | `Promise<PlaytimeMap>` | All records as `{ [id]: PlayRecord }`. |
+
+`lastPlayed` and `totalMs` are updated automatically on each launch. Session end (window focus after a game launch) is detected via the `win.on('focus')` event.
+
+#### Phase 6 — Settings
+
+| Method | Returns | Notes |
+|--------|---------|-------|
+| `getSettings()` | `Promise<Settings>` | Reads `settings.json` from userData. |
+| `setSettings(patch)` | `Promise<LaunchResult>` | Writes only known fields; unknown keys are dropped. |
+
+**Settings fields:** `steamGridDbApiKey` (string), `minimizeOnLaunch` (boolean, default true).
+
+#### Phases 1–3 requests fulfilled (Antigravity)
+
+- **Exe icon extraction:** `GameEntry.cover` is now automatically populated from `app.getFileIcon()` when a game has an `exe` path and no user-set or cached cover art.
+- **`hero` field:** `GameEntry.hero` carries the wide landscape backdrop image. Set by SteamGridDB; never by the user manually.
+
+#### Phase 7 — Security audit
+
+All IPC handlers reviewed:
+- Every handler receiving an `id` validates it is a non-empty string before any file or registry access.
+- `games:add` and `games:edit` run full `validateEntry()` before writing — exe must be absolute, URIs must match the allowlist.
+- `settings:set` only writes a known allowlist of fields; arbitrary keys are silently dropped.
+- `games:scan-folder` requires the path to be absolute and existing before walking.
+- `games:fetch-art` uses `net.request` (Electron's proxy-aware fetch) — no outbound connections made without an explicit API key set by the user.
+- No IPC handler passes renderer-supplied strings to `shell.openExternal` — URIs come exclusively from `games.json`.
+
 ### Phase 2 + 3 — complete (backend)
 
 **New IPC channels added via `window.api`:**
@@ -112,6 +158,4 @@ in `LibraryStatus.warnings`.
 
 ## Requests
 
-- **From Antigravity → Kiro (Icons & Artwork):**
-  1. **Automatic `.exe` icon extraction:** In `src/main`, when a game has `exe` and no custom `cover`, extract the Windows executable's real icon using `app.getFileIcon(exe, { size: 'large' })` (PNG data URL) and return it on `GameEntry.cover` so every `.exe` game tile automatically shows its real game icon.
-  2. **Phase 4 Artwork (`cover` + `hero`):** Support full-bleed `hero` artwork alongside tile `cover` art so the PS5 backdrop and tile icons both use real game imagery.
+_(No open requests.)_
