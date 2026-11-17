@@ -26,7 +26,15 @@ function getInitials(name: string): string {
   return (words[0][0] + words[1][0]).toUpperCase()
 }
 
+const BROWSER_DEMO_GAMES: GameEntry[] = [
+  { id: 'demo-notepad', name: 'Notepad (demo)', color: '#2f6bff' },
+  { id: 'demo-cs2', name: 'Counter-Strike 2', color: '#e67e22' },
+  { id: 'demo-cyberpunk', name: 'Cyberpunk 2077', color: '#eab308' },
+  { id: 'demo-elden', name: 'Elden Ring', color: '#10b981' }
+]
+
 function App(): React.JSX.Element {
+  const isElectron = typeof window !== 'undefined' && Boolean(window.api)
   const [status, setStatus] = useState<LibraryStatus | null>(null)
   const [index, setIndex] = useState(0)
   const [launchError, setLaunchError] = useState('')
@@ -68,7 +76,7 @@ function App(): React.JSX.Element {
         ok: false,
         games: [],
         error:
-          'Open Sky Launcher in the Electron window (npm run dev) to access your local game library.',
+          'You are viewing the Vite web preview in a browser. Switch to the Sky Launcher Electron desktop window to scan your laptop, open games.json, and launch games.',
         warnings: []
       })
       return
@@ -102,7 +110,7 @@ function App(): React.JSX.Element {
           ok: false,
           games: [],
           error:
-            'Open Sky Launcher in the Electron window (npm run dev) to access your local game library.',
+            'You are viewing the Vite web preview in a browser. Switch to the Sky Launcher Electron desktop window to scan your laptop, open games.json, and launch games.',
           warnings: []
         })
 
@@ -164,7 +172,11 @@ function App(): React.JSX.Element {
 
   const launch = useCallback(async () => {
     const game = latest.current.games[latest.current.index]
-    if (!game || busy.current || !window.api) return
+    if (!game || busy.current) return
+    if (!window.api) {
+      setLaunchError('Launching games requires the Sky Launcher Electron desktop window.')
+      return
+    }
     busy.current = true
     setLaunching(true)
     setLaunchError('')
@@ -187,7 +199,12 @@ function App(): React.JSX.Element {
 
   const revealSelectedGame = useCallback(async () => {
     const game = latest.current.games[latest.current.index]
-    if (!game || !window.api) return
+    if (!game) return
+    if (!window.api) {
+      setLaunchError('Opening Explorer requires the Sky Launcher Electron desktop window.')
+      closeModal()
+      return
+    }
     setLaunchError('')
     const res = await window.api.revealGame(game.id)
     if (!res.ok) {
@@ -198,7 +215,15 @@ function App(): React.JSX.Element {
 
   const removeSelectedGame = useCallback(async () => {
     const game = latest.current.games[latest.current.index]
-    if (!game || !window.api) return
+    if (!game) return
+    if (!window.api) {
+      setStatus((prev) =>
+        prev ? { ...prev, games: prev.games.filter((g) => g.id !== game.id) } : prev
+      )
+      setIndex((i) => Math.max(0, i - 1))
+      closeModal()
+      return
+    }
     const res = await window.api.removeGame(game.id)
     if (!res.ok) {
       setLaunchError(res.error ?? 'Could not remove this game.')
@@ -210,7 +235,10 @@ function App(): React.JSX.Element {
   }, [closeModal, loadLibrary])
 
   const openGamesFile = useCallback(async () => {
-    if (!window.api) return
+    if (!window.api) {
+      setLaunchError('Opening games.json requires the Sky Launcher Electron desktop window.')
+      return
+    }
     await window.api.openGamesFile()
   }, [])
 
@@ -450,27 +478,51 @@ function App(): React.JSX.Element {
         </main>
       ) : isErrorState ? (
         <main className="center-panel" role="alert">
-          <div className="state-card state-card-error">
-            <span className="state-badge">games.json could not be read</span>
-            <h1>Your library file has a syntax error</h1>
+          <div className={`state-card ${isElectron ? 'state-card-error' : ''}`}>
+            <span className="state-badge">
+              {isElectron ? 'games.json could not be read' : 'Browser preview mode'}
+            </span>
+            <h1>
+              {isElectron
+                ? 'Your library file has a syntax error'
+                : 'Open the Electron desktop window for full features'}
+            </h1>
             <p className="state-copy">
               {status.error ?? 'Open games.json to fix the formatting, then reload your library.'}
             </p>
             <div className="action-row">
-              <button
-                type="button"
-                className={`btn btn-primary ${modalActionIndex === 0 ? 'focused' : ''}`}
-                onClick={() => void openGamesFile()}
-              >
-                Open games.json
-              </button>
-              <button
-                type="button"
-                className={`btn btn-secondary ${modalActionIndex === 1 ? 'focused' : ''}`}
-                onClick={() => void loadLibrary()}
-              >
-                Reload library
-              </button>
+              {isElectron ? (
+                <>
+                  <button
+                    type="button"
+                    className={`btn btn-primary ${modalActionIndex === 0 ? 'focused' : ''}`}
+                    onClick={() => void openGamesFile()}
+                  >
+                    Open games.json
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn-secondary ${modalActionIndex === 1 ? 'focused' : ''}`}
+                    onClick={() => void loadLibrary()}
+                  >
+                    Reload library
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() =>
+                    setStatus({
+                      ok: true,
+                      games: BROWSER_DEMO_GAMES,
+                      warnings: []
+                    })
+                  }
+                >
+                  Preview PS5 UI with demo games
+                </button>
+              )}
             </div>
           </div>
         </main>
