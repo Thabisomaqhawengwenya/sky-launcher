@@ -123,6 +123,7 @@ function App(): React.JSX.Element {
   const [launchError, setLaunchError] = useState('')
   const [fetchingArt, setFetchingArt] = useState(false)
   const [launching, setLaunching] = useState(false)
+  const [smallIcons, setSmallIcons] = useState<Record<string, boolean>>({})
   const [activeModal, setActiveModal] = useState<ActiveModal>('none')
   const [confirmRemove, setConfirmRemove] = useState(false)
   const [modalActionIndex, setModalActionIndex] = useState(0)
@@ -978,9 +979,26 @@ function App(): React.JSX.Element {
                       aria-label={g.name}
                       aria-pressed={isActive}
                     >
-                      <div className="ribbon-tile-inner">
+                      <div
+                        className={`ribbon-tile-inner ${smallIcons[g.id] ? 'is-small-icon' : ''}`}
+                        style={{ ['--tile-accent' as string]: g.color ?? '#2f6bff' }}
+                      >
                         {g.cover ? (
-                          <img src={g.cover} alt={g.name} draggable={false} />
+                          <img
+                            src={g.cover}
+                            alt={g.name}
+                            draggable={false}
+                            onLoad={(e) => {
+                              const img = e.currentTarget
+                              const isSmall =
+                                img.naturalWidth > 0 &&
+                                img.naturalWidth <= 96 &&
+                                img.naturalHeight <= 96
+                              setSmallIcons((prev) =>
+                                prev[g.id] === isSmall ? prev : { ...prev, [g.id]: isSmall }
+                              )
+                            }}
+                          />
                         ) : (
                           <div
                             className="tile-fallback"

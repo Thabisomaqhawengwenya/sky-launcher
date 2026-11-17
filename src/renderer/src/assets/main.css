@@ -51,7 +51,8 @@ body {
 }
 
 .backdrop.has-cover {
-  filter: blur(2px) brightness(0.76) saturate(1.12);
+  filter: blur(56px) brightness(0.52) saturate(1.35);
+  transform: scale(1.22);
 }
 
 .backdrop.has-hero {
@@ -305,6 +306,26 @@ body {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.ribbon-tile-inner.is-small-icon {
+  --tile-accent: #2f6bff;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(
+      circle at 30% 25%,
+      color-mix(in srgb, var(--tile-accent) 44%, transparent),
+      transparent 72%
+    ),
+    linear-gradient(155deg, #192340 0%, #0d1426 100%);
+}
+
+.ribbon-tile-inner.is-small-icon img {
+  width: 56%;
+  height: 56%;
+  object-fit: contain;
+  filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.55));
 }
 
 .tile-fallback {
