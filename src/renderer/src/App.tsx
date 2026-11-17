@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { LibraryStatus } from '../../preload/index.d'
+import type { GameEntry, LibraryStatus } from '../../preload/index.d'
+import { GameFormModal } from './components/GameFormModal'
+import { ScanModal } from './components/ScanModal'
+
+type ActiveModal = 'none' | 'library' | 'game-options' | 'add' | 'edit' | 'scan'
 
 function getRibbonMetrics(width: number): {
   activeTile: number
@@ -27,7 +31,8 @@ function App(): React.JSX.Element {
   const [index, setIndex] = useState(0)
   const [launchError, setLaunchError] = useState('')
   const [launching, setLaunching] = useState(false)
-  const [showOptions, setShowOptions] = useState(false)
+  const [activeModal, setActiveModal] = useState<ActiveModal>('none')
+  const [confirmRemove, setConfirmRemove] = useState(false)
   const [modalActionIndex, setModalActionIndex] = useState(0)
   const [gamepadConnected, setGamepadConnected] = useState(false)
   const [time, setTime] = useState(() => new Date())
@@ -39,7 +44,7 @@ function App(): React.JSX.Element {
   const latest = useRef({
     games,
     index,
-    showOptions,
+    activeModal,
     modalActionIndex,
     launchError,
     statusOk: status?.ok ?? true
@@ -48,16 +53,16 @@ function App(): React.JSX.Element {
     latest.current = {
       games,
       index,
-      showOptions,
+      activeModal,
       modalActionIndex,
       launchError,
       statusOk: status?.ok ?? true
     }
-  }, [games, index, showOptions, modalActionIndex, launchError, status?.ok])
+  }, [games, index, activeModal, modalActionIndex, launchError, status?.ok])
 
   const busy = useRef(false)
 
-  const loadLibrary = useCallback(async () => {
+  const loadLibrary = useCallback(async (focusGameId?: string) => {
     if (!window.api) {
       setStatus({
         ok: false,
@@ -71,6 +76,13 @@ function App(): React.JSX.Element {
     try {
       const next = await window.api.getStatus()
       setStatus(next)
+      if (focusGameId) {
+        const found = next.games.findIndex((g) => g.id === focusGameId)
+        if (found >= 0) {
+          setIndex(found)
+          return
+        }
+      }
       setIndex((i) => Math.min(i, Math.max(next.games.length - 1, 0)))
     } catch {
       setStatus({
@@ -133,9 +145,15 @@ function App(): React.JSX.Element {
     }
   }, [])
 
+  const closeModal = useCallback(() => {
+    setActiveModal('none')
+    setConfirmRemove(false)
+    setModalActionIndex(0)
+  }, [])
+
   const move = useCallback((dir: number) => {
-    const { showOptions: inModal, games: list, statusOk } = latest.current
-    if (inModal || !statusOk || list.length === 0) {
+    const { activeModal: modal, games: list, statusOk } = latest.current
+    if (modal !== 'none' || !statusOk || list.length === 0) {
       setModalActionIndex((prev) => (prev + dir + 2) % 2)
       return
     }
@@ -146,7 +164,7 @@ function App(): React.JSX.Element {
 
   const launch = useCallback(async () => {
     const game = latest.current.games[latest.current.index]
-    if (!game || busy.current) return
+    if (!game || busy.current || !window.api) return
     busy.current = true
     setLaunching(true)
     setLaunchError('')
@@ -167,6 +185,30 @@ function App(): React.JSX.Element {
     }
   }, [])
 
+  const revealSelectedGame = useCallback(async () => {
+    const game = latest.current.games[latest.current.index]
+    if (!game || !window.api) return
+    setLaunchError('')
+    const res = await window.api.revealGame(game.id)
+    if (!res.ok) {
+      setLaunchError(res.error ?? 'Could not open this game’s folder.')
+    }
+    closeModal()
+  }, [closeModal])
+
+  const removeSelectedGame = useCallback(async () => {
+    const game = latest.current.games[latest.current.index]
+    if (!game || !window.api) return
+    const res = await window.api.removeGame(game.id)
+    if (!res.ok) {
+      setLaunchError(res.error ?? 'Could not remove this game.')
+      closeModal()
+      return
+    }
+    closeModal()
+    await loadLibrary()
+  }, [closeModal, loadLibrary])
+
   const openGamesFile = useCallback(async () => {
     if (!window.api) return
     await window.api.openGamesFile()
@@ -181,32 +223,51 @@ function App(): React.JSX.Element {
   }, [openGamesFile, loadLibrary])
 
   const handleConfirm = useCallback(() => {
-    const { showOptions: inModal, statusOk, games: list } = latest.current
-    if (inModal || !statusOk || list.length === 0) {
+    const { activeModal: modal, statusOk, games: list } = latest.current
+    if (modal === 'library' || !statusOk || list.length === 0) {
       activateModalAction()
       return
     }
-    void launch()
+    if (modal === 'none') {
+      void launch()
+    }
   }, [activateModalAction, launch])
 
   const handleBack = useCallback(() => {
-    if (latest.current.showOptions) {
-      setShowOptions(false)
+    if (latest.current.activeModal !== 'none') {
+      closeModal()
       return
     }
     if (latest.current.launchError) {
       setLaunchError('')
     }
-  }, [])
+  }, [closeModal])
 
   const toggleOptions = useCallback(() => {
-    setShowOptions((prev) => !prev)
+    setConfirmRemove(false)
     setModalActionIndex(0)
+    setActiveModal((prev) => {
+      if (prev !== 'none') return 'none'
+      return latest.current.games.length > 0 ? 'game-options' : 'library'
+    })
   }, [])
 
   // Keyboard navigation
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
+      const target = e.target as HTMLElement | null
+      const inInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
+
+      if (e.key === 'Escape') {
+        if (latest.current.activeModal !== 'none' || latest.current.launchError) {
+          e.preventDefault()
+          handleBack()
+        }
+        return
+      }
+
+      if (inInput) return
+
       if (e.key === 'ArrowRight') {
         e.preventDefault()
         move(1)
@@ -218,7 +279,7 @@ function App(): React.JSX.Element {
         if (activeTag === 'BUTTON') return
         e.preventDefault()
         handleConfirm()
-      } else if (e.key === 'Escape' || e.key === 'Backspace') {
+      } else if (e.key === 'Backspace') {
         handleBack()
       } else if (e.key === 'y' || e.key === 'Y') {
         e.preventDefault()
@@ -310,13 +371,21 @@ function App(): React.JSX.Element {
             <button
               type="button"
               className="warning-chip"
-              onClick={toggleOptions}
+              onClick={() => setActiveModal('library')}
               title="View skipped entries from games.json"
             >
               <span className="warning-dot" />
               {warnings.length} {warnings.length === 1 ? 'warning' : 'warnings'}
             </button>
           )}
+
+          <button type="button" className="top-action-btn" onClick={() => setActiveModal('scan')}>
+            Scan laptop
+          </button>
+
+          <button type="button" className="top-action-btn" onClick={() => setActiveModal('add')}>
+            + Add game
+          </button>
 
           {gamepadConnected && (
             <span className="icon-pill" title="Controller connected" aria-label="Controller ready">
@@ -357,8 +426,8 @@ function App(): React.JSX.Element {
           <button
             type="button"
             className="icon-btn"
-            onClick={toggleOptions}
-            title="Library & Warnings (Y)"
+            onClick={() => setActiveModal('library')}
+            title="Library & Warnings"
             aria-label="Library and warnings"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -409,26 +478,33 @@ function App(): React.JSX.Element {
         <main className="center-panel">
           <div className="state-card">
             <span className="state-badge">Empty library</span>
-            <h1>No playable games found</h1>
+            <h1>No playable games yet</h1>
             <p className="state-copy">
               {warnings.length > 0
-                ? 'All entries in games.json were skipped because of invalid paths or URIs. Open games.json to fix them, or press Y to inspect the warnings.'
-                : 'Add games to games.json in your app data folder, then reload your library.'}
+                ? 'All entries in games.json were skipped because of invalid paths or URIs. Scan your laptop, add a game, or open games.json.'
+                : 'Scan your laptop for installed games or add a game executable directly.'}
             </p>
             <div className="action-row">
               <button
                 type="button"
-                className={`btn btn-primary ${modalActionIndex === 0 ? 'focused' : ''}`}
-                onClick={() => void openGamesFile()}
+                className="btn btn-primary"
+                onClick={() => setActiveModal('scan')}
               >
-                Open games.json
+                Scan laptop for games
               </button>
               <button
                 type="button"
-                className={`btn btn-secondary ${modalActionIndex === 1 ? 'focused' : ''}`}
-                onClick={() => void loadLibrary()}
+                className="btn btn-secondary"
+                onClick={() => setActiveModal('add')}
               >
-                Reload library
+                + Add game
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => void openGamesFile()}
+              >
+                Open games.json
               </button>
             </div>
           </div>
@@ -469,9 +545,9 @@ function App(): React.JSX.Element {
                 <button
                   type="button"
                   className="ribbon-tile library-tile"
-                  onClick={toggleOptions}
-                  title="Library & Warnings (Y)"
-                  aria-label="Open Library and Warnings"
+                  onClick={() => setActiveModal('scan')}
+                  title="Scan laptop for games"
+                  aria-label="Scan laptop for games"
                 >
                   <div className="ribbon-tile-inner library-tile-inner">
                     <svg width="32" height="32" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -520,9 +596,12 @@ function App(): React.JSX.Element {
               <button
                 type="button"
                 className="more-circle"
-                onClick={toggleOptions}
-                title="Library & Warnings (Y)"
-                aria-label="Library and warnings"
+                onClick={() => {
+                  setConfirmRemove(false)
+                  setActiveModal('game-options')
+                }}
+                title="Game options (Y)"
+                aria-label="Game options"
               >
                 •••
               </button>
@@ -540,7 +619,7 @@ function App(): React.JSX.Element {
           <kbd>Enter</kbd> / <kbd>A</kbd> Play
         </span>
         <span>
-          <kbd>Y</kbd> Library &amp; Warnings
+          <kbd>Y</kbd> Options
         </span>
         <span>
           <kbd>R</kbd> Reload
@@ -550,23 +629,92 @@ function App(): React.JSX.Element {
         </span>
       </footer>
 
-      {showOptions && (
+      {/* Game Options Modal (Y / •••) */}
+      {activeModal === 'game-options' && game && (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${game.name} options`}
+          onClick={closeModal}
+        >
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>{game.name}</h2>
+              <button type="button" className="close-btn" onClick={closeModal} aria-label="Close">
+                Esc / B
+              </button>
+            </div>
+
+            <p className="modal-subtitle">Manage this game or open its install folder.</p>
+
+            <div className="options-stack">
+              <button
+                type="button"
+                className="option-row-btn"
+                onClick={() => void revealSelectedGame()}
+              >
+                <span>Open file location in Explorer</span>
+                <span className="option-hint">Shows .exe folder</span>
+              </button>
+
+              <button
+                type="button"
+                className="option-row-btn"
+                onClick={() => setActiveModal('edit')}
+              >
+                <span>Edit game details</span>
+                <span className="option-hint">Name, .exe, cover, colour</span>
+              </button>
+
+              {!confirmRemove ? (
+                <button
+                  type="button"
+                  className="option-row-btn danger"
+                  onClick={() => setConfirmRemove(true)}
+                >
+                  <span>Remove from Sky Launcher</span>
+                  <span className="option-hint">Keeps game files on disk</span>
+                </button>
+              ) : (
+                <div className="confirm-remove-box">
+                  <span>Remove {game.name} from Sky Launcher?</span>
+                  <div className="confirm-remove-actions">
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      onClick={() => void removeSelectedGame()}
+                    >
+                      Yes, remove
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => setConfirmRemove(false)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Library & Warnings Modal */}
+      {activeModal === 'library' && (
         <div
           className="modal-backdrop"
           role="dialog"
           aria-modal="true"
           aria-label="Library and warnings"
-          onClick={() => setShowOptions(false)}
+          onClick={closeModal}
         >
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h2>Library &amp; Warnings</h2>
-              <button
-                type="button"
-                className="close-btn"
-                onClick={() => setShowOptions(false)}
-                aria-label="Close"
-              >
+              <button type="button" className="close-btn" onClick={closeModal} aria-label="Close">
                 Esc / B
               </button>
             </div>
@@ -593,7 +741,21 @@ function App(): React.JSX.Element {
             <div className="action-row">
               <button
                 type="button"
-                className={`btn btn-primary ${modalActionIndex === 0 ? 'focused' : ''}`}
+                className="btn btn-primary"
+                onClick={() => setActiveModal('scan')}
+              >
+                Scan laptop
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setActiveModal('add')}
+              >
+                + Add game
+              </button>
+              <button
+                type="button"
+                className={`btn btn-secondary ${modalActionIndex === 0 ? 'focused' : ''}`}
                 onClick={() => void openGamesFile()}
               >
                 Open games.json
@@ -603,11 +765,35 @@ function App(): React.JSX.Element {
                 className={`btn btn-secondary ${modalActionIndex === 1 ? 'focused' : ''}`}
                 onClick={() => void loadLibrary()}
               >
-                Reload library
+                Reload
               </button>
             </div>
           </div>
         </div>
+      )}
+
+      {/* Add / Edit Game Modal */}
+      {(activeModal === 'add' || activeModal === 'edit') && (
+        <GameFormModal
+          mode={activeModal}
+          initialGame={activeModal === 'edit' ? game : undefined}
+          onClose={closeModal}
+          onSaved={async (savedGame: GameEntry | undefined) => {
+            closeModal()
+            await loadLibrary(savedGame?.id)
+          }}
+        />
+      )}
+
+      {/* Scan Laptop Modal */}
+      {activeModal === 'scan' && (
+        <ScanModal
+          existingNames={games.map((g) => g.name)}
+          onClose={closeModal}
+          onImported={async () => {
+            await loadLibrary()
+          }}
+        />
       )}
     </div>
   )

@@ -633,3 +633,251 @@ button:focus-visible,
     animation: none;
   }
 }
+
+/* Phase 2 + 3: Top-bar action pills, forms, game options, and scan results */
+.top-action-btn {
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: #f4f6fb;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.16s ease,
+    border-color 0.16s ease;
+}
+
+.top-action-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.modal-wide {
+  width: min(720px, 100%);
+}
+
+.options-stack {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.option-row-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 18px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f4f6fb;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.16s ease,
+    border-color 0.16s ease;
+}
+
+.option-row-btn:hover {
+  background: rgba(255, 255, 255, 0.13);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.option-row-btn.danger {
+  border-color: rgba(248, 113, 113, 0.28);
+  color: #fecaca;
+}
+
+.option-row-btn.danger:hover {
+  background: rgba(239, 68, 68, 0.16);
+  border-color: rgba(248, 113, 113, 0.5);
+}
+
+.option-hint {
+  font-size: 13px;
+  font-weight: 400;
+  color: #9aa6c1;
+}
+
+.confirm-remove-box {
+  padding: 16px 18px;
+  border-radius: 14px;
+  background: rgba(127, 29, 29, 0.38);
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 15px;
+}
+
+.confirm-remove-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.btn-danger {
+  background: #dc2626;
+  color: #ffffff;
+}
+
+/* Add / Edit Form */
+.form-grid {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+.text-input {
+  width: 100%;
+  padding: 11px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(7, 11, 22, 0.72);
+  color: #f4f6fb;
+  font: inherit;
+  font-size: 15px;
+}
+
+.text-input:focus-visible {
+  outline: 3px solid #ffffff;
+  outline-offset: 2px;
+}
+
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.swatch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.swatch {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+}
+
+.swatch.active {
+  border-color: #ffffff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.35);
+}
+
+.color-picker {
+  width: 34px;
+  height: 30px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+/* Scan Results */
+.scan-results {
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.scan-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  color: #cbd5e1;
+}
+
+.scan-toolbar-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.candidate-list {
+  list-style: none;
+  max-height: 280px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 4px;
+}
+
+.candidate-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  cursor: pointer;
+}
+
+.candidate-row.checked {
+  background: rgba(47, 107, 255, 0.14);
+  border-color: rgba(96, 165, 250, 0.42);
+}
+
+.candidate-name {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.source-badge {
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.1);
+  color: #e2e8f0;
+}
+
+.source-steam {
+  background: rgba(56, 189, 248, 0.18);
+  color: #bae6fd;
+}
+
+.source-epic {
+  background: rgba(168, 85, 247, 0.2);
+  color: #e9d5ff;
+}
+
+.source-gog {
+  background: rgba(236, 72, 153, 0.2);
+  color: #fbcfe8;
+}
+
+.in-library-tag {
+  font-size: 12px;
+  color: #94a3b8;
+}
