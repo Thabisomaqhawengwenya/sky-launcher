@@ -44,6 +44,42 @@ laptop and only launches them. Electron + React + TypeScript (electron-vite reac
 
 ## Current status
 
+### Phase 2 + 3 — complete (backend)
+
+**New IPC channels added via `window.api`:**
+
+| Method | Returns | Notes |
+|--------|---------|-------|
+| `pickExe()` | `Promise<string \| null>` | Native Windows file dialog, filtered to `.exe`. Returns absolute path or null if cancelled. |
+| `pickCover()` | `Promise<string \| null>` | Native file dialog for `.png/.jpg/.jpeg/.webp`. Returns path or null. |
+| `pickFolder()` | `Promise<string \| null>` | Native folder dialog. Returns path or null. Pass result to `scanFolder()`. |
+| `addGame(input)` | `Promise<WriteResult>` | Validates + appends to `games.json`. Main generates the id. |
+| `editGame(id, patch)` | `Promise<WriteResult>` | Merges patch onto existing entry and rewrites `games.json`. |
+| `removeGame(id)` | `Promise<LaunchResult>` | Removes entry by id. |
+| `revealGame(id)` | `Promise<LaunchResult>` | Opens the game's exe folder in Explorer. |
+| `scanStores()` | `Promise<ScanCandidate[]>` | Scans Steam (registry + `.acf` manifests), Epic (`Manifests/*.item`), GOG (registry). Returns candidates — nothing written until `addGame()` is called. |
+| `scanFolder(path)` | `Promise<ScanCandidate[]>` | Scans a folder up to 3 levels deep for `.exe` files. `path` must come from `pickFolder()`. |
+
+**New types (from `index.d.ts`):**
+
+```ts
+ScanCandidate = { name, exe?, uri?, source: 'steam'|'epic'|'gog'|'folder' }
+WriteResult   = { ok, error?, game?: GameEntry }
+AddGameInput  = { name, exe?, uri?, cover?, color?, args? }
+EditGameInput = { name?, exe?, uri?, cover?, color?, args? }
+```
+
+**Add game flow:**
+1. UI calls `pickExe()` → receives path
+2. UI calls `pickCover()` → receives path (optional)
+3. UI calls `addGame({ name, exe: path, cover: coverPath, color })` → receives `{ ok, game }`
+
+**Scan + add flow:**
+1. UI calls `scanStores()` → receives `ScanCandidate[]`
+   - or: UI calls `pickFolder()` → `scanFolder(path)` → `ScanCandidate[]`
+2. User picks candidates they want to keep
+3. UI calls `addGame(candidate)` for each confirmed entry
+
 ### Phase 1 — complete (backend)
 
 **`games.json` location:** `%APPDATA%\game-launcher\games.json`
@@ -76,4 +112,4 @@ in `LibraryStatus.warnings`.
 
 ## Requests
 
-_(Agents add cross-area requests here.)_
+_(No open requests.)_
