@@ -111,6 +111,16 @@ export function ScanModal({
       setError('Could not add the selected games. Check their paths or URIs.')
       return
     }
+    try {
+      const art = await window.api.fetchArtAll()
+      if (art.ok && art.queued > 0) {
+        setTimeout(() => {
+          void onImported()
+        }, 3000)
+      }
+    } catch {
+      // Ignore art fetch errors when no API key is configured
+    }
     await onImported()
     onClose()
   }

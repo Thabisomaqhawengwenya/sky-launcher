@@ -26,6 +26,7 @@ export function GameFormModal({
   const [sourceType, setSourceType] = useState<'exe' | 'uri'>('exe')
   const [exePath, setExePath] = useState<string | null>(null)
   const [uri, setUri] = useState('')
+  const [argsText, setArgsText] = useState('')
   const [coverPath, setCoverPath] = useState<string | null>(null)
   const [color, setColor] = useState(initialGame?.color ?? '#2f6bff')
   const [saving, setSaving] = useState(false)
@@ -79,6 +80,7 @@ export function GameFormModal({
 
     setSaving(true)
     setError('')
+    const parsedArgs = argsText.trim().split(/\s+/).filter(Boolean)
     try {
       const res =
         mode === 'add'
@@ -86,6 +88,7 @@ export function GameFormModal({
               name: trimmedName,
               ...(exePath ? { exe: exePath } : {}),
               ...(trimmedUri ? { uri: trimmedUri } : {}),
+              ...(parsedArgs.length > 0 ? { args: parsedArgs } : {}),
               ...(coverPath ? { cover: coverPath } : {}),
               color
             })
@@ -93,6 +96,7 @@ export function GameFormModal({
               name: trimmedName,
               ...(exePath ? { exe: exePath } : {}),
               ...(trimmedUri ? { uri: trimmedUri } : {}),
+              ...(parsedArgs.length > 0 ? { args: parsedArgs } : {}),
               ...(coverPath ? { cover: coverPath } : {}),
               color
             })
@@ -224,6 +228,17 @@ export function GameFormModal({
                 />
               )}
             </div>
+
+            <label className="sheet-row">
+              <span className="sheet-label">Launch arguments (optional)</span>
+              <input
+                type="text"
+                className="sheet-input"
+                value={argsText}
+                onChange={(e) => setArgsText(e.target.value)}
+                placeholder="e.g. -fullscreen -dx12"
+              />
+            </label>
 
             <div className="sheet-row">
               <span className="sheet-label">Accent</span>

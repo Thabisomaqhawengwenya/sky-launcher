@@ -7,8 +7,24 @@ import { SettingsModal } from './components/SettingsModal'
 type ActiveModal = 'none' | 'settings' | 'game-options' | 'add' | 'edit' | 'scan'
 type LibraryFilter = 'all' | 'recent' | 'favorites'
 
+const FILTER_ORDER: LibraryFilter[] = ['all', 'recent', 'favorites']
 const FAV_STORAGE_KEY = 'sky_launcher_favorites_v1'
 const SOUND_STORAGE_KEY = 'sky_launcher_sound_v1'
+
+function moveModalFocus(dir: 1 | -1): void {
+  const modal = document.querySelector('.modal-backdrop')
+  if (!modal) return
+  const focusables = Array.from(
+    modal.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((el) => el.offsetParent !== null)
+  if (focusables.length === 0) return
+  const current = document.activeElement as HTMLElement | null
+  const idx = current ? focusables.indexOf(current) : -1
+  const next = (idx + dir + focusables.length) % focusables.length
+  focusables[next]?.focus()
+}
 
 function getRibbonMetrics(width: number): {
   activeTile: number
@@ -349,9 +365,23 @@ function App(): React.JSX.Element {
     }
   }, [])
 
+  const cycleFilter = useCallback((dir: 1 | -1) => {
+    setFilter((prev) => {
+      const idx = FILTER_ORDER.indexOf(prev)
+      const next = FILTER_ORDER[(idx + dir + FILTER_ORDER.length) % FILTER_ORDER.length]
+      return next
+    })
+    setIndex(0)
+    playUiSound('move', latest.current.soundEnabled)
+  }, [])
+
   const move = useCallback((dir: number) => {
     const { activeModal: modal, games: list, statusOk, soundEnabled: sfx } = latest.current
-    if (modal !== 'none' || !statusOk || list.length === 0) {
+    if (modal !== 'none') {
+      moveModalFocus(dir > 0 ? 1 : -1)
+      return
+    }
+    if (!statusOk || list.length === 0) {
       setModalActionIndex((prev) => (prev + dir + 2) % 2)
       return
     }
@@ -476,13 +506,18 @@ function App(): React.JSX.Element {
 
   const handleConfirm = useCallback(() => {
     const { activeModal: modal, statusOk, games: list } = latest.current
+    if (modal !== 'none') {
+      const active = document.activeElement as HTMLElement | null
+      if (active && active.closest('.modal-backdrop')) {
+        active.click()
+      }
+      return
+    }
     if (!statusOk || list.length === 0) {
       activateModalAction()
       return
     }
-    if (modal === 'none') {
-      void launch()
-    }
+    void launch()
   }, [activateModalAction, launch])
 
   const handleBack = useCallback(() => {
@@ -539,6 +574,22 @@ function App(): React.JSX.Element {
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault()
         move(-1)
+      } else if (e.key === 'ArrowDown' && latest.current.activeModal !== 'none') {
+        e.preventDefault()
+        moveModalFocus(1)
+      } else if (e.key === 'ArrowUp' && latest.current.activeModal !== 'none') {
+        e.preventDefault()
+        moveModalFocus(-1)
+      } else if (e.key === 'q' || e.key === 'Q') {
+        if (latest.current.activeModal === 'none') {
+          e.preventDefault()
+          cycleFilter(-1)
+        }
+      } else if (e.key === 'e' || e.key === 'E') {
+        if (latest.current.activeModal === 'none') {
+          e.preventDefault()
+          cycleFilter(1)
+        }
       } else if (e.key === 'Enter') {
         const activeTag = document.activeElement?.tagName
         if (activeTag === 'BUTTON') return
@@ -559,26 +610,45 @@ function App(): React.JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [move, handleConfirm, handleBack, toggleOptions, loadLibrary, toggleFavorite])
+  }, [move, cycleFilter, handleConfirm, handleBack, toggleOptions, loadLibrary, toggleFavorite])
 
-  // Gamepad navigation: D-pad/left stick move, A (0) select, B (1) back, Y (3) options
+  // Gamepad navigation: D-pad/left stick move, LB/RB switch tabs, A (0) select, B (1) back, Y (3) options
   useEffect(() => {
     let raf = 0
     let lastMove = 0
     let aWasDown = false
     let bWasDown = false
     let yWasDown = false
+    let lbWasDown = false
+    let rbWasDown = false
 
     const tick = (now: number): void => {
       const pad = navigator.getGamepads().find((p) => p)
       if (pad) {
         const x = pad.axes[0] ?? 0
+        const yAxis = pad.axes[1] ?? 0
         const left = pad.buttons[14]?.pressed || x < -0.5
         const right = pad.buttons[15]?.pressed || x > 0.5
-        if ((left || right) && now - lastMove > 180) {
+        const up = pad.buttons[12]?.pressed || yAxis < -0.5
+        const down = pad.buttons[13]?.pressed || yAxis > 0.5
+
+        if (latest.current.activeModal !== 'none') {
+          if ((up || down || left || right) && now - lastMove > 180) {
+            moveModalFocus(up || left ? -1 : 1)
+            lastMove = now
+          }
+        } else if ((left || right) && now - lastMove > 180) {
           move(left ? -1 : 1)
           lastMove = now
         }
+
+        const lb = pad.buttons[4]?.pressed ?? false
+        if (lb && !lbWasDown && latest.current.activeModal === 'none') cycleFilter(-1)
+        lbWasDown = lb
+
+        const rb = pad.buttons[5]?.pressed ?? false
+        if (rb && !rbWasDown && latest.current.activeModal === 'none') cycleFilter(1)
+        rbWasDown = rb
 
         const a = pad.buttons[0]?.pressed ?? false
         if (a && !aWasDown) handleConfirm()
@@ -597,7 +667,7 @@ function App(): React.JSX.Element {
 
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [move, handleConfirm, handleBack, toggleOptions])
+  }, [move, cycleFilter, handleConfirm, handleBack, toggleOptions])
 
   const game = visibleGames[clampedIndex]
   const backdropArt = game?.hero ?? game?.cover
@@ -1018,6 +1088,12 @@ function App(): React.JSX.Element {
 
           {/* Lower-Left Hero Title & Play Hub */}
           <section className="hero-hub">
+            {gamePlayRecord?.sessionStart && (
+              <span className="running-pill">
+                <span className="running-dot" />
+                Running
+              </span>
+            )}
             <h1 className="hero-title">{game?.name}</h1>
 
             {launchError ? (
@@ -1078,6 +1154,9 @@ function App(): React.JSX.Element {
         </span>
         <span>
           <kbd>/</kbd> Search
+        </span>
+        <span>
+          <kbd>Q</kbd> / <kbd>E</kbd> · LB / RB Tabs
         </span>
         <span>
           <kbd>F11</kbd> Fullscreen
