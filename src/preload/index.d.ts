@@ -11,7 +11,14 @@ export type GameEntry = {
   cover?: string
   /** Base64 data URL — wide landscape art for the backdrop (SteamGridDB hero). */
   hero?: string
+  /** User-set accent colour override. */
   color?: string
+  /** Automatically extracted dominant colour from cover art when no user colour is set. */
+  autoColor?: string
+  /** Free-text notes about the game (max 500 chars). */
+  notes?: string
+  /** User-defined tags (max 20, 30 chars each). */
+  tags?: string[]
 }
 
 export type LaunchResult = {
@@ -48,6 +55,10 @@ export type AddGameInput = {
   cover?: string
   color?: string
   args?: string[]
+  /** Free-text notes (max 500 chars). */
+  notes?: string
+  /** User-defined tags (max 20, 30 chars each). */
+  tags?: string[]
 }
 
 export type EditGameInput = {
@@ -57,6 +68,10 @@ export type EditGameInput = {
   cover?: string
   color?: string
   args?: string[]
+  /** Free-text notes (max 500 chars). */
+  notes?: string
+  /** User-defined tags (max 20, 30 chars each). */
+  tags?: string[]
 }
 
 export type Settings = {
@@ -75,9 +90,32 @@ export type PlayRecord = {
   lastPlayed: string
   totalMs: number
   sessionStart?: string
+  /** Number of times the game has been launched. */
+  sessions?: number
+  /** ISO timestamp of the very first launch. */
+  firstPlayed?: string
 }
 
 export type PlaytimeMap = Record<string, PlayRecord>
+
+/** Derived play statistics for a single game. */
+export type PlayStats = {
+  /** Number of recorded launch sessions. */
+  sessions: number
+  /** Total play time in milliseconds. */
+  totalMs: number
+  /** Average session length in milliseconds. */
+  avgSessionMs: number
+  /**
+   * Longest single session in milliseconds.
+   * Without per-session history this equals totalMs (worst-case one session).
+   */
+  longestSessionMs: number
+  /** ISO timestamp of the first launch, or empty string if never played. */
+  firstPlayed: string
+  /** ISO timestamp of the most recent launch, or empty string if never played. */
+  lastPlayed: string
+}
 
 /** Pushed by main during a fetchArtAll() batch. */
 export type ArtProgressEvent = {
@@ -126,6 +164,18 @@ declare global {
       getSettings(): Promise<Settings>
       setSettings(patch: Partial<Settings>): Promise<LaunchResult>
 
+      /**
+       * Returns whether Sky Launcher is configured to open at Windows login.
+       * Uses the OS login-item API — separate from settings.json.
+       */
+      getLoginItem(): Promise<{ enabled: boolean }>
+
+      /**
+       * Enable or disable Sky Launcher opening at Windows login.
+       * Pass `true` to enable, `false` to disable.
+       */
+      setLoginItem(enabled: boolean): Promise<LaunchResult>
+
       // ── Cover art ───────────────────────────────────────────────────────
       fetchArt(id: string): Promise<WriteResult>
       /**
@@ -137,6 +187,45 @@ declare global {
       // ── Play time ───────────────────────────────────────────────────────
       getPlaytime(id: string): Promise<PlayRecord | null>
       getAllPlaytime(): Promise<PlaytimeMap>
+
+      /**
+       * Returns derived play statistics for a game: session count, total time,
+       * average session, longest session, first and last played dates.
+       */
+      getPlayStats(id: string): Promise<PlayStats>
+
+      // ── Now Playing pill ─────────────────────────────────────────────────
+      /**
+       * Dismiss the floating "Now Playing" pill overlay.
+       * Useful when the launcher window is restored by the user.
+       */
+      hidePill(): Promise<void>
+
+      // ── Library export / import ──────────────────────────────────────────
+      /**
+       * Open a Save dialog and write the current games.json to the chosen path.
+       */
+      exportLibrary(): Promise<LaunchResult>
+
+      /**
+       * Open an Open dialog, parse and validate the chosen JSON file,
+       * and return a preview without writing anything.
+       * On success the returned `filePath` can be passed to importLibraryConfirm.
+       */
+      importLibrary(): Promise<{
+        ok: boolean
+        filePath?: string
+        games?: GameEntry[]
+        warnings?: string[]
+        error?: string
+      }>
+
+      /**
+       * Re-reads and re-validates the file at `filePath` (must be the path
+       * returned by importLibrary), then overwrites the active games.json.
+       * Always re-validates on the main side — never trusts the renderer's parse.
+       */
+      importLibraryConfirm(filePath: string): Promise<LaunchResult>
 
       // ── Push event subscriptions ─────────────────────────────────────────
       /**
@@ -160,6 +249,12 @@ declare global {
        * Returns an unsubscribe function.
        */
       onPlaytimeUpdated(cb: (id: string) => void): () => void
+      /**
+       * Called when an exe-launched game exits within 4 seconds with a non-zero
+       * exit code — indicating a likely crash. The launcher window is automatically
+       * restored. Returns an unsubscribe function.
+       */
+      onGameCrashed(cb: (id: string) => void): () => void
     }
   }
 }

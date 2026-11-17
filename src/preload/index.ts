@@ -31,6 +31,10 @@ const api = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   setSettings: (patch: object) => ipcRenderer.invoke('settings:set', patch),
 
+  // ── Auto-launch on startup (Feature 4) ───────────────────────────────────
+  getLoginItem: () => ipcRenderer.invoke('settings:get-login-item'),
+  setLoginItem: (enabled: boolean) => ipcRenderer.invoke('settings:set-login-item', { enabled }),
+
   // ── Cover art ─────────────────────────────────────────────────────────────
   fetchArt: (id: string) => ipcRenderer.invoke('games:fetch-art', id),
   fetchArtAll: () => ipcRenderer.invoke('games:fetch-art-all'),
@@ -38,6 +42,17 @@ const api = {
   // ── Play time ─────────────────────────────────────────────────────────────
   getPlaytime: (id: string) => ipcRenderer.invoke('playtime:get', id),
   getAllPlaytime: () => ipcRenderer.invoke('playtime:get-all'),
+
+  // ── Play stats (Feature 3) ────────────────────────────────────────────────
+  getPlayStats: (id: string) => ipcRenderer.invoke('playtime:stats', id),
+
+  // ── Now Playing pill (Feature 2) ─────────────────────────────────────────
+  hidePill: () => ipcRenderer.invoke('pill:hide'),
+
+  // ── Library export / import (Feature 8) ──────────────────────────────────
+  exportLibrary: () => ipcRenderer.invoke('games:export'),
+  importLibrary: () => ipcRenderer.invoke('games:import'),
+  importLibraryConfirm: (filePath: string) => ipcRenderer.invoke('games:import-confirm', filePath),
 
   // ── Push event subscriptions ─────────────────────────────────────────────
   // These return an unsubscribe function so the UI can clean up.
@@ -73,6 +88,13 @@ const api = {
     const handler = (_e: Electron.IpcRendererEvent, id: string): void => cb(id)
     ipcRenderer.on('playtime:updated', handler)
     return () => ipcRenderer.removeListener('playtime:updated', handler)
+  },
+
+  /** Called when an exe-launched game exits within 4 seconds with a non-zero code (crash). */
+  onGameCrashed: (cb: (id: string) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, id: string): void => cb(id)
+    ipcRenderer.on('game:crashed', handler)
+    return () => ipcRenderer.removeListener('game:crashed', handler)
   }
 }
 

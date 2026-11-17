@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, dialog, net } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, net, screen } from 'electron'
 import { join, dirname, extname, isAbsolute, basename } from 'path'
 import { spawn, execFile, type ChildProcess } from 'child_process'
 import {
@@ -24,6 +24,8 @@ type RawGame = {
   uri?: unknown
   cover?: unknown
   color?: unknown
+  notes?: unknown
+  tags?: unknown
 }
 
 type Game = {
@@ -34,6 +36,8 @@ type Game = {
   uri?: string
   cover?: string
   color?: string
+  notes?: string
+  tags?: string[]
 }
 
 type GameEntry = {
@@ -42,6 +46,9 @@ type GameEntry = {
   cover?: string
   hero?: string
   color?: string
+  autoColor?: string
+  notes?: string
+  tags?: string[]
 }
 
 type LaunchResult = { ok: boolean; error?: string }
@@ -69,9 +76,20 @@ type PlayRecord = {
   lastPlayed: string
   totalMs: number
   sessionStart?: string
+  sessions?: number
+  firstPlayed?: string
 }
 
 type PlaytimeMap = Record<string, PlayRecord>
+
+type PlayStats = {
+  sessions: number
+  totalMs: number
+  avgSessionMs: number
+  longestSessionMs: number
+  firstPlayed: string
+  lastPlayed: string
+}
 
 type Settings = {
   steamGridDbApiKey?: string
@@ -213,10 +231,13 @@ function recordLaunch(id: string): void {
   try {
     const map = loadPlaytime()
     const existing = map[id] ?? { id, lastPlayed: '', totalMs: 0 }
+    const now = new Date().toISOString()
     map[id] = {
       ...existing,
-      lastPlayed: new Date().toISOString(),
-      sessionStart: new Date().toISOString()
+      lastPlayed: now,
+      sessionStart: now,
+      sessions: (existing.sessions ?? 0) + 1,
+      firstPlayed: existing.firstPlayed ?? now
     }
     savePlaytime(map)
   } catch {
@@ -238,6 +259,31 @@ function recordSessionEnd(id: string): void {
     savePlaytime(map)
   } catch {
     // Non-critical.
+  }
+}
+
+function computePlayStats(id: string): PlayStats {
+  const map = loadPlaytime()
+  const rec = map[id]
+  if (!rec || rec.totalMs === 0) {
+    return {
+      sessions: 0,
+      totalMs: 0,
+      avgSessionMs: 0,
+      longestSessionMs: 0,
+      firstPlayed: '',
+      lastPlayed: ''
+    }
+  }
+  const sessions = rec.sessions ?? Math.max(1, Math.round(rec.totalMs / 3_600_000))
+  const avgSessionMs = sessions > 0 ? rec.totalMs / sessions : 0
+  return {
+    sessions,
+    totalMs: rec.totalMs,
+    avgSessionMs,
+    longestSessionMs: rec.totalMs,
+    firstPlayed: rec.firstPlayed ?? '',
+    lastPlayed: rec.lastPlayed
   }
 }
 
@@ -280,6 +326,22 @@ function validateEntry(raw: RawGame, index: number): Game | string {
   const cover = typeof raw.cover === 'string' && raw.cover ? raw.cover : undefined
   const color = typeof raw.color === 'string' && raw.color ? raw.color : undefined
 
+  // Notes: string, trimmed, max 500 chars
+  const notes =
+    typeof raw.notes === 'string' && raw.notes.trim() ? raw.notes.trim().slice(0, 500) : undefined
+
+  // Tags: array of non-empty strings, max 20 tags, max 30 chars each
+  let tags: string[] | undefined
+  if (Array.isArray(raw.tags)) {
+    const filtered = (raw.tags as unknown[])
+      .filter((t): t is string => typeof t === 'string')
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0)
+      .map((t) => t.slice(0, 30))
+      .slice(0, 20)
+    if (filtered.length > 0) tags = filtered
+  }
+
   return {
     id,
     name,
@@ -287,7 +349,9 @@ function validateEntry(raw: RawGame, index: number): Game | string {
     args,
     uri: typeof raw.uri === 'string' ? raw.uri : undefined,
     cover,
-    color
+    color,
+    notes,
+    tags
   }
 }
 
@@ -338,8 +402,83 @@ function loadGames(): LoadResult {
 }
 
 // ---------------------------------------------------------------------------
+// Dominant colour extraction (Feature 1)
+// ---------------------------------------------------------------------------
+
+function rgbToHsl(r: number, g: number, b: number): { h: number; s: number; l: number } {
+  const rn = r / 255
+  const gn = g / 255
+  const bn = b / 255
+  const max = Math.max(rn, gn, bn)
+  const min = Math.min(rn, gn, bn)
+  const l = (max + min) / 2
+  if (max === min) return { h: 0, s: 0, l }
+  const d = max - min
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
+  let h: number
+  if (max === rn) {
+    h = (gn - bn) / d + (gn < bn ? 6 : 0)
+  } else if (max === gn) {
+    h = (bn - rn) / d + 2
+  } else {
+    h = (rn - gn) / d + 4
+  }
+  h /= 6
+  return { h, s, l }
+}
+
+function extractDominantColor(buf: Buffer): string {
+  const MAX_SAMPLES = 200
+  const step = Math.max(3, Math.floor(buf.length / MAX_SAMPLES))
+
+  let bestR = 47
+  let bestG = 107
+  let bestB = 255
+  let bestSat = -1
+
+  for (let offset = 0; offset + 2 < buf.length; offset += step) {
+    const r = Math.max(0, Math.min(255, buf[offset]))
+    const g = Math.max(0, Math.min(255, buf[offset + 1]))
+    const b = Math.max(0, Math.min(255, buf[offset + 2]))
+    const { s } = rgbToHsl(r, g, b)
+    if (s > bestSat) {
+      bestSat = s
+      bestR = r
+      bestG = g
+      bestB = b
+    }
+  }
+
+  if (bestSat < 0) return '#2f6bff'
+
+  return `#${Math.round(bestR).toString(16).padStart(2, '0')}${Math.round(bestG).toString(16).padStart(2, '0')}${Math.round(bestB).toString(16).padStart(2, '0')}`
+}
+
+// ---------------------------------------------------------------------------
 // Art helpers
 // ---------------------------------------------------------------------------
+
+const ART_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+
+function artMetaPath(imagePath: string): string {
+  return `${imagePath}.meta.json`
+}
+
+function isCacheStale(imagePath: string): boolean {
+  const metaPath = artMetaPath(imagePath)
+  if (!existsSync(metaPath)) return false // no sidecar → treat as valid (backwards compat)
+  try {
+    const raw: unknown = JSON.parse(readFileSync(metaPath, 'utf-8'))
+    if (typeof raw !== 'object' || raw === null) return false
+    const meta = raw as Record<string, unknown>
+    if (typeof meta.fetchedAt !== 'string') return false
+    const fetchedAt = new Date(meta.fetchedAt).getTime()
+    if (Number.isNaN(fetchedAt)) return false
+    return Date.now() - fetchedAt > ART_CACHE_MAX_AGE_MS
+  } catch {
+    return false
+  }
+}
 
 function toDataUrl(file?: string): string | undefined {
   if (!file) return undefined
@@ -366,9 +505,13 @@ function cachedArtPaths(id: string): { cover?: string; hero?: string } {
   const dir = artCacheDir()
   const coverPath = join(dir, `${id}-cover.png`)
   const heroPath = join(dir, `${id}-hero.png`)
+
+  const coverExists = existsSync(coverPath)
+  const heroExists = existsSync(heroPath)
+
   return {
-    cover: existsSync(coverPath) ? coverPath : undefined,
-    hero: existsSync(heroPath) ? heroPath : undefined
+    cover: coverExists && !isCacheStale(coverPath) ? coverPath : undefined,
+    hero: heroExists && !isCacheStale(heroPath) ? heroPath : undefined
   }
 }
 
@@ -379,7 +522,32 @@ async function toEntry(g: Game): Promise<GameEntry> {
     toDataUrl(cached.cover) ??
     (g.exe ? await exeIconDataUrl(g.exe) : undefined)
   const hero: string | undefined = toDataUrl(cached.hero)
-  return { id: g.id, name: g.name, color: g.color, cover, hero }
+
+  // Derive auto colour from cover art when no user colour is set
+  let autoColor: string | undefined
+  if (!g.color && cover && cover.startsWith('data:')) {
+    try {
+      const commaIdx = cover.indexOf(',')
+      if (commaIdx !== -1) {
+        const b64 = cover.slice(commaIdx + 1)
+        const buf = Buffer.from(b64, 'base64')
+        autoColor = extractDominantColor(buf)
+      }
+    } catch {
+      // Non-critical — skip auto colour on failure.
+    }
+  }
+
+  return {
+    id: g.id,
+    name: g.name,
+    color: g.color,
+    autoColor,
+    cover,
+    hero,
+    notes: g.notes,
+    tags: g.tags
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -491,6 +659,12 @@ async function downloadAndCache(url: string, destPath: string): Promise<string |
   try {
     const buf = await fetchBinary(url)
     writeFileSync(destPath, buf)
+    // Write sidecar metadata for stale-cache invalidation (Feature 6)
+    writeFileSync(
+      artMetaPath(destPath),
+      JSON.stringify({ fetchedAt: new Date().toISOString() }),
+      'utf-8'
+    )
     return destPath
   } catch {
     return undefined
@@ -498,18 +672,109 @@ async function downloadAndCache(url: string, destPath: string): Promise<string |
 }
 
 // ---------------------------------------------------------------------------
-// Launch helper — now returns the ChildProcess for exit tracking
+// Now Playing pill window (Feature 2)
 // ---------------------------------------------------------------------------
 
-function launchExeProcess(
-  exe: string,
-  args: string[]
-): Promise<{ result: LaunchResult; child?: ChildProcess }> {
+let pillWin: BrowserWindow | null = null
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function showPillWindow(gameName: string): void {
+  // Close any existing pill before showing a new one
+  if (pillWin && !pillWin.isDestroyed()) {
+    pillWin.destroy()
+    pillWin = null
+  }
+
+  const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
+
+  const win = new BrowserWindow({
+    width: 220,
+    height: 52,
+    x: screenW - 240,
+    y: screenH - 72,
+    alwaysOnTop: true,
+    frame: false,
+    transparent: true,
+    skipTaskbar: true,
+    resizable: false,
+    show: false,
+    webPreferences: {
+      sandbox: false,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  })
+
+  const safeName = escapeHtml(gameName)
+  const html = `<!doctype html><html><head><meta charset="UTF-8"><style>*{margin:0;padding:0;box-sizing:border-box}html,body{height:100%;overflow:hidden;-webkit-app-region:drag;font-family:'Segoe UI',system-ui,sans-serif;background:rgba(10,15,28,0.92);backdrop-filter:blur(12px);border-radius:14px;border:1px solid rgba(255,255,255,0.12);color:#f4f6fb}body{display:flex;align-items:center;gap:12px;padding:0 16px}#dot{width:8px;height:8px;border-radius:50%;background:#22c55e;flex-shrink:0;animation:pulse 1.8s ease-in-out infinite}@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}#name{font-size:13px;font-weight:600;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;flex:1}#close{-webkit-app-region:no-drag;width:22px;height:22px;border-radius:50%;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:#f4f6fb;font-size:13px;cursor:pointer;display:grid;place-items:center;flex-shrink:0}</style></head><body><div id="dot"></div><span id="name">${safeName}</span><button id="close" onclick="window.close()">&#x2715;</button></body></html>`
+
+  win.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(html)}`)
+
+  win.once('ready-to-show', () => {
+    if (!win.isDestroyed()) win.show()
+  })
+
+  pillWin = win
+}
+
+function hidePillWindow(): void {
+  if (pillWin && !pillWin.isDestroyed()) {
+    pillWin.destroy()
+  }
+  pillWin = null
+}
+
+// ---------------------------------------------------------------------------
+// Launch helper — returns the ChildProcess + earlyExitPromise for crash detection
+// ---------------------------------------------------------------------------
+
+type LaunchExeResult = {
+  result: LaunchResult
+  child?: ChildProcess
+  earlyExitPromise: Promise<boolean>
+}
+
+function launchExeProcess(exe: string, args: string[]): Promise<LaunchExeResult> {
   return new Promise((resolve) => {
     const child = spawn(exe, args, { cwd: dirname(exe), detached: true, stdio: 'ignore' })
-    child.once('error', (err) => resolve({ result: { ok: false, error: err.message } }))
+
+    child.once('error', (err) => {
+      resolve({
+        result: { ok: false, error: err.message },
+        earlyExitPromise: Promise.resolve(false)
+      })
+    })
+
     child.once('spawn', () => {
-      resolve({ result: { ok: true }, child })
+      // Feature 7: Early crash detection — watch for non-zero exit within 4 seconds
+      const earlyExitPromise = new Promise<boolean>((resolveCrash) => {
+        let settled = false
+
+        const timer = setTimeout(() => {
+          if (!settled) {
+            settled = true
+            resolveCrash(false)
+          }
+        }, 4000)
+
+        child.once('exit', (code, signal) => {
+          if (!settled) {
+            settled = true
+            clearTimeout(timer)
+            const crashed = code !== 0 || signal !== null
+            resolveCrash(crashed)
+          }
+        })
+      })
+
+      resolve({ result: { ok: true }, child, earlyExitPromise })
     })
   })
 }
@@ -799,6 +1064,8 @@ function createWindow(): void {
       recordSessionEnd(pendingSessionEnd)
       pendingSessionEnd = null
     }
+    // URI game ended: hide pill when launcher is re-focused
+    hidePillWindow()
   })
 
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -879,23 +1146,40 @@ app.whenReady().then(() => {
         // URI launches: use focus-based session end (can't watch external processes).
         recordLaunch(id)
         pendingSessionEnd = id
+        // Show pill for URI launch
+        showPillWindow(game.name)
       } else if (game.exe) {
         if (!existsSync(game.exe))
           return {
             ok: false,
             error: `Can't find "${game.exe}". Check the exe path in games.json.`
           }
-        const { result: launchRes, child } = await launchExeProcess(game.exe, game.args ?? [])
+        const {
+          result: launchRes,
+          child,
+          earlyExitPromise
+        } = await launchExeProcess(game.exe, game.args ?? [])
         result = launchRes
         if (result.ok && child) {
           recordLaunch(id)
+          // Show pill for exe launch
+          showPillWindow(game.name)
           // Process exit detection: end session precisely when the game exits.
           child.once('exit', () => {
             recordSessionEnd(id)
+            hidePillWindow()
             // Notify the renderer so it can refresh playtime immediately.
             BrowserWindow.getAllWindows()[0]?.webContents.send('playtime:updated', id)
           })
-          // No focus-based fallback needed for exe launches.
+          // Feature 7: Early crash detection
+          void earlyExitPromise.then((crashed) => {
+            if (crashed) {
+              const mainWin = BrowserWindow.getAllWindows()[0]
+              mainWin?.restore()
+              mainWin?.webContents.send('game:crashed', id)
+              hidePillWindow()
+            }
+          })
         }
       } else {
         return { ok: false, error: 'This game has no exe or uri in games.json.' }
@@ -995,14 +1279,17 @@ app.whenReady().then(() => {
       const idx = games.findIndex((g) => g.id === id)
       if (idx === -1) return { ok: false, error: `Game "${id}" not found in games.json.` }
       const existing = games[idx]
+      const p = patch as RawGame
       const merged: RawGame = {
         id: existing.id,
-        name: (patch as RawGame).name ?? existing.name,
-        exe: (patch as RawGame).exe ?? existing.exe,
-        args: (patch as RawGame).args ?? existing.args,
-        uri: (patch as RawGame).uri ?? existing.uri,
-        cover: (patch as RawGame).cover ?? existing.cover,
-        color: (patch as RawGame).color ?? existing.color
+        name: p.name ?? existing.name,
+        exe: p.exe ?? existing.exe,
+        args: p.args ?? existing.args,
+        uri: p.uri ?? existing.uri,
+        cover: p.cover ?? existing.cover,
+        color: p.color ?? existing.color,
+        notes: p.notes ?? existing.notes,
+        tags: p.tags ?? existing.tags
       }
       const result = validateEntry(merged, idx)
       if (typeof result === 'string') return { ok: false, error: result }
@@ -1076,6 +1363,35 @@ app.whenReady().then(() => {
       const msg = err instanceof Error ? err.message : String(err)
       return { ok: false, error: `Could not save settings: ${msg}` }
     }
+  })
+
+  // ── Auto-launch on startup (Feature 4) ───────────────────────────────────
+
+  ipcMain.handle('settings:get-login-item', (): { enabled: boolean } => {
+    return { enabled: app.getLoginItemSettings().openAtLogin }
+  })
+
+  ipcMain.handle('settings:set-login-item', (_e, payload: unknown): LaunchResult => {
+    if (typeof payload !== 'object' || payload === null) {
+      return { ok: false, error: 'Invalid payload.' }
+    }
+    const p = payload as Record<string, unknown>
+    if (typeof p.enabled !== 'boolean') {
+      return { ok: false, error: '"enabled" must be a boolean.' }
+    }
+    try {
+      app.setLoginItemSettings({ openAtLogin: p.enabled })
+      return { ok: true }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return { ok: false, error: `Could not update login item: ${msg}` }
+    }
+  })
+
+  // ── Pill hide (Feature 2) ─────────────────────────────────────────────────
+
+  ipcMain.handle('pill:hide', (): void => {
+    hidePillWindow()
   })
 
   // ── Cover art (SteamGridDB) ───────────────────────────────────────────────
@@ -1156,6 +1472,135 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('playtime:get-all', (): PlaytimeMap => loadPlaytime())
+
+  // ── Play stats (Feature 3) ────────────────────────────────────────────────
+
+  ipcMain.handle('playtime:stats', (_e, id: unknown): PlayStats => {
+    if (typeof id !== 'string' || !id.trim()) {
+      return {
+        sessions: 0,
+        totalMs: 0,
+        avgSessionMs: 0,
+        longestSessionMs: 0,
+        firstPlayed: '',
+        lastPlayed: ''
+      }
+    }
+    return computePlayStats(id)
+  })
+
+  // ── Library export / import (Feature 8) ──────────────────────────────────
+
+  ipcMain.handle('games:export', async (): Promise<LaunchResult> => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    try {
+      const result = await dialog.showSaveDialog(win, {
+        title: 'Export library',
+        defaultPath: 'sky-launcher-games.json',
+        filters: [{ name: 'JSON', extensions: ['json'] }]
+      })
+      if (result.canceled || !result.filePath) return { ok: false, error: 'Cancelled.' }
+
+      const content = readFileSync(gamesFile(), 'utf-8')
+      writeFileSync(result.filePath, content, 'utf-8')
+      return { ok: true }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return { ok: false, error: `Export failed: ${msg}` }
+    }
+  })
+
+  ipcMain.handle(
+    'games:import',
+    async (): Promise<{
+      ok: boolean
+      filePath?: string
+      games?: GameEntry[]
+      warnings?: string[]
+      error?: string
+    }> => {
+      const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+      try {
+        const result = await dialog.showOpenDialog(win, {
+          title: 'Import library',
+          properties: ['openFile'],
+          filters: [{ name: 'JSON', extensions: ['json'] }]
+        })
+        if (result.canceled || result.filePaths.length === 0) {
+          return { ok: false, error: 'Cancelled.' }
+        }
+        const filePath = result.filePaths[0]
+
+        // Parse and validate — do NOT write yet (renderer previews first)
+        let raw: unknown
+        try {
+          raw = JSON.parse(readFileSync(filePath, 'utf-8'))
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return { ok: false, error: `Could not parse file: ${msg}` }
+        }
+
+        if (!Array.isArray(raw)) {
+          return { ok: false, error: 'File must contain a JSON array.' }
+        }
+
+        const games: Game[] = []
+        const warnings: string[] = []
+        ;(raw as RawGame[]).forEach((entry, i) => {
+          const r = validateEntry(entry, i)
+          if (typeof r === 'string') warnings.push(r)
+          else games.push(r)
+        })
+
+        const entries = await Promise.all(games.map(toEntry))
+        return { ok: true, filePath, games: entries, warnings }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return { ok: false, error: `Import failed: ${msg}` }
+      }
+    }
+  )
+
+  ipcMain.handle('games:import-confirm', (_e, filePath: unknown): LaunchResult => {
+    // Validate the path parameter — never trust the renderer's cached parse
+    if (typeof filePath !== 'string' || !filePath.trim()) {
+      return { ok: false, error: 'Invalid file path.' }
+    }
+    if (!isAbsolute(filePath)) {
+      return { ok: false, error: 'File path must be absolute.' }
+    }
+    if (!existsSync(filePath)) {
+      return { ok: false, error: 'File no longer exists.' }
+    }
+    try {
+      let raw: unknown
+      try {
+        raw = JSON.parse(readFileSync(filePath, 'utf-8'))
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return { ok: false, error: `Could not parse file: ${msg}` }
+      }
+
+      if (!Array.isArray(raw)) {
+        return { ok: false, error: 'File must contain a JSON array.' }
+      }
+
+      // Re-validate every entry
+      const games: Game[] = []
+      const warnings: string[] = []
+      ;(raw as RawGame[]).forEach((entry, i) => {
+        const r = validateEntry(entry, i)
+        if (typeof r === 'string') warnings.push(r)
+        else games.push(r)
+      })
+
+      saveGames(games)
+      return { ok: true }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return { ok: false, error: `Could not import library: ${msg}` }
+    }
+  })
 
   createWindow()
   app.on('activate', () => {
