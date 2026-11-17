@@ -44,6 +44,29 @@ laptop and only launches them. Electron + React + TypeScript (electron-vite reac
 
 ## Current status
 
+### Improvement pass — complete (backend)
+
+| Item | What changed |
+|------|-------------|
+| Process exit detection | `launchExe` now keeps the `ChildProcess` reference. When the game exits, `recordSessionEnd` is called precisely and `playtime:updated` is pushed to the renderer. URI launches still use the focus-based fallback. |
+| games.json file watcher | `fs.watch` on `gamesFile()` starts after `did-finish-load`. On any change it debounces 500 ms then sends `library:changed` to the renderer. |
+| Art progress push events | `fetchArtAll` now sends `art:progress` (per game) and `art:done` (batch end) to the renderer instead of fire-and-forget. |
+| `app:version` IPC | `getVersion()` returns `app.getVersion()` — the string from package.json. |
+| GOG Galaxy URI | `scanGog` reads `gameID` from the registry and emits `goggalaxy://openGame/<id>` URIs. `ALLOWED_URI` now includes `goggalaxy://`. Fallback to raw exe if no gameID found. |
+| Duplicate detection | `markDuplicates()` cross-references scan candidates against existing `games.json` entries by URI and exe path. `ScanCandidate.alreadyInLibrary` is now always present. |
+| Portable games.json path | `Settings.gamesJsonPath` — an optional absolute path. `gamesFile()` reads it. `settings:set` accepts and validates it. |
+| App identity | `package.json`: name `sky-launcher`, description, author updated. `electron-builder.yml`: appId `com.skylauncher.app`, productName `Sky Launcher`, executableName `SkyLauncher`. |
+
+**New push subscriptions (return unsubscribe fn):**
+- `onLibraryChanged(cb)` — games.json changed on disk
+- `onArtProgress(cb)` — per-game art fetch progress
+- `onArtDone(cb)` — art batch complete
+- `onPlaytimeUpdated(cb)` — game process exited, playtime updated
+
+**New IPC method:** `getVersion()` → `Promise<string>`
+
+**Updated types:** `ScanCandidate` now has `alreadyInLibrary: boolean`. `Settings` now has `gamesJsonPath?: string`. `ArtProgressEvent` added.
+
 ### Phases 4–7 — complete (backend)
 
 #### Phase 4 — Cover art (SteamGridDB)

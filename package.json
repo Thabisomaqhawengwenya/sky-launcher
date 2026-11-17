@@ -1,10 +1,10 @@
 {
-  "name": "game-launcher",
+  "name": "sky-launcher",
   "version": "1.0.0",
-  "description": "An Electron application with React and TypeScript",
+  "description": "Console-style game launcher for Windows — PS5/Xbox-style UI for your PC games.",
   "main": "./out/main/index.js",
-  "author": "example.com",
-  "homepage": "https://electron-vite.org",
+  "author": "Maqhawe T Ngwenya",
+  "homepage": "https://github.com/maqhawe/sky-launcher",
   "scripts": {
     "format": "prettier --write .",
     "lint": "eslint --cache .",

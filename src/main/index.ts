@@ -1,7 +1,15 @@
 import { app, shell, BrowserWindow, ipcMain, dialog, net } from 'electron'
 import { join, dirname, extname, isAbsolute, basename } from 'path'
-import { spawn, execFile } from 'child_process'
-import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync } from 'fs'
+import { spawn, execFile, type ChildProcess } from 'child_process'
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  readdirSync,
+  statSync,
+  mkdirSync,
+  watch
+} from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 
 // ---------------------------------------------------------------------------
@@ -18,23 +26,21 @@ type RawGame = {
   color?: unknown
 }
 
-/** A fully-validated game entry that is safe to work with internally. */
 type Game = {
   id: string
   name: string
   exe?: string
   args?: string[]
   uri?: string
-  cover?: string // path on disk
+  cover?: string
   color?: string
 }
 
-/** Sent to the renderer — no raw file paths. cover and hero are data URLs. */
 type GameEntry = {
   id: string
   name: string
-  cover?: string // base64 data URL (tile art / exe icon)
-  hero?: string // base64 data URL (wide backdrop art)
+  cover?: string
+  hero?: string
   color?: string
 }
 
@@ -52,31 +58,42 @@ type ScanCandidate = {
   exe?: string
   uri?: string
   source: 'steam' | 'epic' | 'gog' | 'folder'
+  /** True if a game with the same URI or exe path already exists in games.json. */
+  alreadyInLibrary: boolean
 }
 
 type WriteResult = { ok: boolean; error?: string; game?: GameEntry }
 
-/** Per-game play time record stored in playtime.json. */
 type PlayRecord = {
   id: string
-  lastPlayed: string // ISO 8601
-  totalMs: number // accumulated play time in milliseconds
-  sessionStart?: string // ISO 8601, set when a session is in progress
+  lastPlayed: string
+  totalMs: number
+  sessionStart?: string
 }
 
 type PlaytimeMap = Record<string, PlayRecord>
 
-/** App settings stored in settings.json. */
 type Settings = {
   steamGridDbApiKey?: string
-  minimizeOnLaunch?: boolean // default true
+  minimizeOnLaunch?: boolean
+  /** Custom absolute path for games.json. Defaults to userData/games.json. */
+  gamesJsonPath?: string
+}
+
+/** Pushed to the renderer during fetchArtAll. */
+type ArtProgressEvent = {
+  id: string
+  name: string
+  done: number
+  total: number
+  ok: boolean
 }
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const ALLOWED_URI = /^(steam|com\.epicgames\.launcher):\/\//
+const ALLOWED_URI = /^(steam|com\.epicgames\.launcher|goggalaxy):\/\//
 
 const MIME: Record<string, string> = {
   '.png': 'image/png',
@@ -126,6 +143,10 @@ const SAMPLE: Game[] = [
 // ---------------------------------------------------------------------------
 
 function gamesFile(): string {
+  const settings = loadSettings()
+  if (settings.gamesJsonPath && isAbsolute(settings.gamesJsonPath)) {
+    return settings.gamesJsonPath
+  }
   return join(app.getPath('userData'), 'games.json')
 }
 
@@ -137,7 +158,6 @@ function playtimeFile(): string {
   return join(app.getPath('userData'), 'playtime.json')
 }
 
-/** Directory for cached SteamGridDB images. */
 function artCacheDir(): string {
   const dir = join(app.getPath('userData'), 'art-cache')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
@@ -157,6 +177,9 @@ function loadSettings(): Settings {
     const out: Settings = {}
     if (typeof s.steamGridDbApiKey === 'string') out.steamGridDbApiKey = s.steamGridDbApiKey
     if (typeof s.minimizeOnLaunch === 'boolean') out.minimizeOnLaunch = s.minimizeOnLaunch
+    if (typeof s.gamesJsonPath === 'string' && isAbsolute(s.gamesJsonPath)) {
+      out.gamesJsonPath = s.gamesJsonPath
+    }
     return out
   } catch {
     return {}
@@ -165,8 +188,7 @@ function loadSettings(): Settings {
 
 function saveSettings(patch: Partial<Settings>): void {
   const current = loadSettings()
-  const next: Settings = { ...current, ...patch }
-  writeFileSync(settingsFile(), JSON.stringify(next, null, 2), 'utf-8')
+  writeFileSync(settingsFile(), JSON.stringify({ ...current, ...patch }, null, 2), 'utf-8')
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +209,6 @@ function savePlaytime(map: PlaytimeMap): void {
   writeFileSync(playtimeFile(), JSON.stringify(map, null, 2), 'utf-8')
 }
 
-/** Called when a game is launched. Records lastPlayed and starts session timer. */
 function recordLaunch(id: string): void {
   try {
     const map = loadPlaytime()
@@ -199,12 +220,10 @@ function recordLaunch(id: string): void {
     }
     savePlaytime(map)
   } catch {
-    // Non-critical — ignore.
+    // Non-critical.
   }
 }
 
-/** Called when the launcher window is restored/focused after a game launch.
- *  Ends the in-progress session and adds its duration to totalMs. */
 function recordSessionEnd(id: string): void {
   try {
     const map = loadPlaytime()
@@ -218,7 +237,7 @@ function recordSessionEnd(id: string): void {
     }
     savePlaytime(map)
   } catch {
-    // Non-critical — ignore.
+    // Non-critical.
   }
 }
 
@@ -248,7 +267,7 @@ function validateEntry(raw: RawGame, index: number): Game | string {
   if (raw.uri !== undefined) {
     if (typeof raw.uri !== 'string') return `${label}: "uri" must be a string`
     if (!ALLOWED_URI.test(raw.uri))
-      return `${label}: "uri" must start with steam:// or com.epicgames.launcher:// (got "${raw.uri}")`
+      return `${label}: "uri" must start with steam://, com.epicgames.launcher://, or goggalaxy:// (got "${raw.uri}")`
   }
 
   if (!raw.exe && !raw.uri) return `${label}: must have at least one of "exe" or "uri"`
@@ -319,7 +338,7 @@ function loadGames(): LoadResult {
 }
 
 // ---------------------------------------------------------------------------
-// Art helpers — disk cover, exe icon, SteamGridDB cache
+// Art helpers
 // ---------------------------------------------------------------------------
 
 function toDataUrl(file?: string): string | undefined {
@@ -334,7 +353,6 @@ function toDataUrl(file?: string): string | undefined {
   }
 }
 
-/** Extract the Windows shell icon from an .exe as a PNG data URL. */
 async function exeIconDataUrl(exe: string): Promise<string | undefined> {
   try {
     const img = await app.getFileIcon(exe, { size: 'large' })
@@ -344,7 +362,6 @@ async function exeIconDataUrl(exe: string): Promise<string | undefined> {
   }
 }
 
-/** Return the cached SteamGridDB art paths for a game id, if they exist. */
 function cachedArtPaths(id: string): { cover?: string; hero?: string } {
   const dir = artCacheDir()
   const coverPath = join(dir, `${id}-cover.png`)
@@ -355,19 +372,13 @@ function cachedArtPaths(id: string): { cover?: string; hero?: string } {
   }
 }
 
-/** Build a GameEntry from a Game. Loads exe icons asynchronously when needed. */
 async function toEntry(g: Game): Promise<GameEntry> {
   const cached = cachedArtPaths(g.id)
-
-  // Cover priority: disk path set by user → SteamGridDB cache → exe icon → undefined
   const cover: string | undefined =
     toDataUrl(g.cover) ??
     toDataUrl(cached.cover) ??
     (g.exe ? await exeIconDataUrl(g.exe) : undefined)
-
-  // Hero: SteamGridDB cache only (users don't set heroes manually)
   const hero: string | undefined = toDataUrl(cached.hero)
-
   return { id: g.id, name: g.name, color: g.color, cover, hero }
 }
 
@@ -377,10 +388,6 @@ async function toEntry(g: Game): Promise<GameEntry> {
 
 const SGDB_BASE = 'https://www.steamgriddb.com/api/v2'
 
-/**
- * Fetch a URL using Electron's net module (respects proxy settings, works
- * in the main process without Node's http — no extra dependency needed).
- */
 function fetchJson(url: string, apiKey: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const req = net.request({ url, method: 'GET' })
@@ -417,10 +424,6 @@ function fetchBinary(url: string): Promise<Buffer> {
   })
 }
 
-/**
- * Extract the numeric Steam app id from a steam:// URI, or null.
- * steam://rungameid/730 → "730"
- */
 function steamAppIdFromUri(uri?: string): string | null {
   if (!uri) return null
   const m = uri.match(/^steam:\/\/rungameid\/(\d+)$/)
@@ -429,10 +432,7 @@ function steamAppIdFromUri(uri?: string): string | null {
 
 type SgdbArtResult = { coverUrl?: string; heroUrl?: string }
 
-/** Fetch grid (cover) and hero URLs from SteamGridDB for one game.
- *  Tries by Steam app id first; falls back to name search. */
 async function fetchSgdbArt(
-  _gameId: string,
   gameName: string,
   uri: string | undefined,
   apiKey: string
@@ -440,7 +440,6 @@ async function fetchSgdbArt(
   try {
     let sgdbId: number | null = null
 
-    // ── Resolve the SGDB game id ──────────────────────────────────────────
     const steamAppId = steamAppIdFromUri(uri)
     if (steamAppId) {
       const res = (await fetchJson(`${SGDB_BASE}/games/steam/${steamAppId}`, apiKey)) as {
@@ -464,7 +463,6 @@ async function fetchSgdbArt(
 
     if (sgdbId === null) return {}
 
-    // ── Fetch grid (portrait cover) ───────────────────────────────────────
     let coverUrl: string | undefined
     const gridRes = (await fetchJson(
       `${SGDB_BASE}/grids/game/${sgdbId}?dimensions=600x900`,
@@ -474,7 +472,6 @@ async function fetchSgdbArt(
       coverUrl = gridRes.data[0].url
     }
 
-    // ── Fetch hero (landscape backdrop) ──────────────────────────────────
     let heroUrl: string | undefined
     const heroRes = (await fetchJson(`${SGDB_BASE}/heroes/game/${sgdbId}`, apiKey)) as {
       success?: boolean
@@ -490,7 +487,6 @@ async function fetchSgdbArt(
   }
 }
 
-/** Download one image URL and save it to the art cache. Returns the saved path. */
 async function downloadAndCache(url: string, destPath: string): Promise<string | undefined> {
   try {
     const buf = await fetchBinary(url)
@@ -502,16 +498,18 @@ async function downloadAndCache(url: string, destPath: string): Promise<string |
 }
 
 // ---------------------------------------------------------------------------
-// Launch helper
+// Launch helper — now returns the ChildProcess for exit tracking
 // ---------------------------------------------------------------------------
 
-function launchExe(exe: string, args: string[]): Promise<LaunchResult> {
+function launchExeProcess(
+  exe: string,
+  args: string[]
+): Promise<{ result: LaunchResult; child?: ChildProcess }> {
   return new Promise((resolve) => {
     const child = spawn(exe, args, { cwd: dirname(exe), detached: true, stdio: 'ignore' })
-    child.once('error', (err) => resolve({ ok: false, error: err.message }))
+    child.once('error', (err) => resolve({ result: { ok: false, error: err.message } }))
     child.once('spawn', () => {
-      child.unref()
-      resolve({ ok: true })
+      resolve({ result: { ok: true }, child })
     })
   })
 }
@@ -592,8 +590,8 @@ function steamLibraryRoots(steamInstall: string): string[] {
   }
 }
 
-async function scanSteam(): Promise<ScanCandidate[]> {
-  const candidates: ScanCandidate[] = []
+async function scanSteam(): Promise<Omit<ScanCandidate, 'alreadyInLibrary'>[]> {
+  const candidates: Omit<ScanCandidate, 'alreadyInLibrary'>[] = []
   const installPath = await regQuery('HKLM\\SOFTWARE\\WOW6432Node\\Valve\\Steam', 'InstallPath')
   if (!installPath) return candidates
 
@@ -625,8 +623,8 @@ async function scanSteam(): Promise<ScanCandidate[]> {
   return candidates
 }
 
-async function scanEpic(): Promise<ScanCandidate[]> {
-  const candidates: ScanCandidate[] = []
+async function scanEpic(): Promise<Omit<ScanCandidate, 'alreadyInLibrary'>[]> {
+  const candidates: Omit<ScanCandidate, 'alreadyInLibrary'>[] = []
   const manifestDir = join(
     process.env['ProgramData'] ?? 'C:\\ProgramData',
     'Epic',
@@ -669,20 +667,29 @@ async function scanEpic(): Promise<ScanCandidate[]> {
   return candidates
 }
 
-async function scanGog(): Promise<ScanCandidate[]> {
-  const candidates: ScanCandidate[] = []
+async function scanGog(): Promise<Omit<ScanCandidate, 'alreadyInLibrary'>[]> {
+  const candidates: Omit<ScanCandidate, 'alreadyInLibrary'>[] = []
   const subkeys = await regQuerySubkeys('HKLM\\SOFTWARE\\WOW6432Node\\GOG.com\\Games')
   for (const subkey of subkeys) {
-    const [name, exe] = await Promise.all([regQuery(subkey, 'gameName'), regQuery(subkey, 'exe')])
-    if (!name || !exe) continue
-    if (!isAbsolute(exe) || !existsSync(exe)) continue
-    candidates.push({ name, exe, source: 'gog' })
+    const [name, exe, gameId] = await Promise.all([
+      regQuery(subkey, 'gameName'),
+      regQuery(subkey, 'exe'),
+      regQuery(subkey, 'gameID')
+    ])
+    if (!name) continue
+
+    // Prefer GOG Galaxy URI so Galaxy handles DRM and updates.
+    if (gameId) {
+      candidates.push({ name, uri: `goggalaxy://openGame/${gameId}`, source: 'gog' })
+    } else if (exe && isAbsolute(exe) && existsSync(exe)) {
+      candidates.push({ name, exe, source: 'gog' })
+    }
   }
   return candidates
 }
 
-function scanFolder(folderPath: string, depth = 3): ScanCandidate[] {
-  const candidates: ScanCandidate[] = []
+function scanFolder(folderPath: string, depth = 3): Omit<ScanCandidate, 'alreadyInLibrary'>[] {
+  const candidates: Omit<ScanCandidate, 'alreadyInLibrary'>[] = []
   function walk(dir: string, remaining: number): void {
     if (remaining < 0) return
     let entries: string[]
@@ -712,11 +719,56 @@ function scanFolder(folderPath: string, depth = 3): ScanCandidate[] {
   return candidates
 }
 
+/**
+ * Mark candidates that already exist in the library (by URI or exe path).
+ * Hard duplicates are not filtered out — the UI decides whether to show them.
+ */
+function markDuplicates(
+  candidates: Omit<ScanCandidate, 'alreadyInLibrary'>[],
+  existing: Game[]
+): ScanCandidate[] {
+  const existingUris = new Set(existing.map((g) => g.uri).filter(Boolean) as string[])
+  const existingExes = new Set(
+    existing.map((g) => g.exe?.toLowerCase()).filter(Boolean) as string[]
+  )
+  return candidates.map((c) => ({
+    ...c,
+    alreadyInLibrary:
+      (!!c.uri && existingUris.has(c.uri)) || (!!c.exe && existingExes.has(c.exe.toLowerCase()))
+  }))
+}
+
+// ---------------------------------------------------------------------------
+// games.json file watcher — pushes library:changed to the renderer
+// ---------------------------------------------------------------------------
+
+let watcherDebounce: ReturnType<typeof setTimeout> | null = null
+
+function startGamesFileWatcher(win: BrowserWindow): void {
+  const file = gamesFile()
+  // Ensure the file exists before watching.
+  if (!existsSync(file)) loadGames()
+
+  try {
+    watch(file, () => {
+      // Debounce: editors write multiple events on save.
+      if (watcherDebounce) clearTimeout(watcherDebounce)
+      watcherDebounce = setTimeout(() => {
+        if (!win.isDestroyed()) {
+          win.webContents.send('library:changed')
+        }
+      }, 500)
+    })
+  } catch {
+    // If watch fails (network drive, permission, etc.) just skip it.
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Window
 // ---------------------------------------------------------------------------
 
-/** Id of the game whose session we should end when the window regains focus. */
+/** Id of the game whose session should end when the window next regains focus. */
 let pendingSessionEnd: string | null = null
 
 function createWindow(): void {
@@ -740,7 +792,8 @@ function createWindow(): void {
     if (process.platform === 'win32') win.moveTop()
   })
 
-  // When the launcher window is restored after a game launch, end the session.
+  // End session when the user returns to the launcher (focus-based fallback
+  // for URI launches where we can't watch the process directly).
   win.on('focus', () => {
     if (pendingSessionEnd) {
       recordSessionEnd(pendingSessionEnd)
@@ -758,6 +811,11 @@ function createWindow(): void {
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  // Start the games.json file watcher after the window is ready.
+  win.webContents.once('did-finish-load', () => startGamesFileWatcher(win))
+
+  return
 }
 
 // ---------------------------------------------------------------------------
@@ -765,15 +823,14 @@ function createWindow(): void {
 // ---------------------------------------------------------------------------
 
 app.whenReady().then(() => {
-  electronApp.setAppUserModelId('com.gamelauncher.app')
+  electronApp.setAppUserModelId('com.skylauncher.app')
   app.on('browser-window-created', (_, window) => optimizer.watchWindowShortcuts(window))
 
   // ── Read ──────────────────────────────────────────────────────────────────
 
   ipcMain.handle('games:list', async (): Promise<GameEntry[]> => {
     try {
-      const { games } = loadGames()
-      return await Promise.all(games.map(toEntry))
+      return await Promise.all(loadGames().games.map(toEntry))
     } catch {
       return []
     }
@@ -782,13 +839,19 @@ app.whenReady().then(() => {
   ipcMain.handle('games:status', async (): Promise<LibraryStatus> => {
     try {
       const { games, warnings, parseError } = loadGames()
-      const entries = await Promise.all(games.map(toEntry))
-      return { ok: !parseError, games: entries, error: parseError, warnings }
+      return {
+        ok: !parseError,
+        games: await Promise.all(games.map(toEntry)),
+        error: parseError,
+        warnings
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       return { ok: false, games: [], error: msg, warnings: [] }
     }
   })
+
+  ipcMain.handle('app:version', (): string => app.getVersion())
 
   // ── Launch + reveal ────────────────────────────────────────────────────────
 
@@ -807,16 +870,33 @@ app.whenReady().then(() => {
 
       if (game.uri) {
         if (!ALLOWED_URI.test(game.uri))
-          return { ok: false, error: 'Only steam:// and Epic links are allowed.' }
+          return {
+            ok: false,
+            error: 'Only steam://, Epic, and GOG Galaxy links are allowed.'
+          }
         await shell.openExternal(game.uri)
         result = { ok: true }
+        // URI launches: use focus-based session end (can't watch external processes).
+        recordLaunch(id)
+        pendingSessionEnd = id
       } else if (game.exe) {
         if (!existsSync(game.exe))
           return {
             ok: false,
             error: `Can't find "${game.exe}". Check the exe path in games.json.`
           }
-        result = await launchExe(game.exe, game.args ?? [])
+        const { result: launchRes, child } = await launchExeProcess(game.exe, game.args ?? [])
+        result = launchRes
+        if (result.ok && child) {
+          recordLaunch(id)
+          // Process exit detection: end session precisely when the game exits.
+          child.once('exit', () => {
+            recordSessionEnd(id)
+            // Notify the renderer so it can refresh playtime immediately.
+            BrowserWindow.getAllWindows()[0]?.webContents.send('playtime:updated', id)
+          })
+          // No focus-based fallback needed for exe launches.
+        }
       } else {
         return { ok: false, error: 'This game has no exe or uri in games.json.' }
       }
@@ -826,11 +906,8 @@ app.whenReady().then(() => {
     }
 
     if (result.ok) {
-      recordLaunch(id)
-      pendingSessionEnd = id
       const settings = loadSettings()
-      const shouldMinimize = settings.minimizeOnLaunch !== false // default true
-      if (shouldMinimize) BrowserWindow.getAllWindows()[0]?.minimize()
+      if (settings.minimizeOnLaunch !== false) BrowserWindow.getAllWindows()[0]?.minimize()
     }
     return result
   })
@@ -959,7 +1036,8 @@ app.whenReady().then(() => {
   ipcMain.handle('games:scan', async (): Promise<ScanCandidate[]> => {
     try {
       const [steam, epic, gog] = await Promise.all([scanSteam(), scanEpic(), scanGog()])
-      return [...steam, ...epic, ...gog]
+      const { games } = loadGames()
+      return markDuplicates([...steam, ...epic, ...gog], games)
     } catch (err) {
       console.error('games:scan error:', err instanceof Error ? err.message : String(err))
       return []
@@ -970,7 +1048,8 @@ app.whenReady().then(() => {
     if (typeof folderPath !== 'string' || !folderPath.trim()) return []
     if (!isAbsolute(folderPath) || !existsSync(folderPath)) return []
     try {
-      return scanFolder(folderPath)
+      const { games } = loadGames()
+      return markDuplicates(scanFolder(folderPath), games)
     } catch {
       return []
     }
@@ -978,18 +1057,19 @@ app.whenReady().then(() => {
 
   // ── Settings ──────────────────────────────────────────────────────────────
 
-  ipcMain.handle('settings:get', (): Settings => {
-    return loadSettings()
-  })
+  ipcMain.handle('settings:get', (): Settings => loadSettings())
 
   ipcMain.handle('settings:set', (_e, patch: unknown): LaunchResult => {
     if (typeof patch !== 'object' || patch === null) return { ok: false, error: 'Invalid patch.' }
     try {
-      // Only accept known fields — ignore anything else.
       const p = patch as Record<string, unknown>
       const safe: Partial<Settings> = {}
       if (typeof p.steamGridDbApiKey === 'string') safe.steamGridDbApiKey = p.steamGridDbApiKey
       if (typeof p.minimizeOnLaunch === 'boolean') safe.minimizeOnLaunch = p.minimizeOnLaunch
+      if (typeof p.gamesJsonPath === 'string') {
+        // Accept empty string to reset to default.
+        safe.gamesJsonPath = p.gamesJsonPath.trim() || undefined
+      }
       saveSettings(safe)
       return { ok: true }
     } catch (err) {
@@ -1000,49 +1080,35 @@ app.whenReady().then(() => {
 
   // ── Cover art (SteamGridDB) ───────────────────────────────────────────────
 
-  /**
-   * Fetch cover + hero art from SteamGridDB for a single game and cache to disk.
-   * Returns the updated GameEntry (with new cover/hero data URLs) so the UI can
-   * refresh without reloading the whole library.
-   * No-ops silently if no API key is configured.
-   */
   ipcMain.handle('games:fetch-art', async (_e, id: unknown): Promise<WriteResult> => {
     if (typeof id !== 'string' || !id.trim()) return { ok: false, error: 'Invalid game id.' }
 
     const { steamGridDbApiKey } = loadSettings()
-    if (!steamGridDbApiKey) {
+    if (!steamGridDbApiKey)
       return {
         ok: false,
         error: 'No SteamGridDB API key set. Add one in Settings to fetch cover art.'
       }
-    }
 
     const { games } = loadGames()
     const game = games.find((g) => g.id === id)
     if (!game) return { ok: false, error: `Game "${id}" not found.` }
 
-    const { coverUrl, heroUrl } = await fetchSgdbArt(
-      game.id,
-      game.name,
-      game.uri,
-      steamGridDbApiKey
-    )
+    const { coverUrl, heroUrl } = await fetchSgdbArt(game.name, game.uri, steamGridDbApiKey)
     const dir = artCacheDir()
-
     if (coverUrl) await downloadAndCache(coverUrl, join(dir, `${game.id}-cover.png`))
     if (heroUrl) await downloadAndCache(heroUrl, join(dir, `${game.id}-hero.png`))
 
-    if (!coverUrl && !heroUrl) {
+    if (!coverUrl && !heroUrl)
       return { ok: false, error: `No art found for "${game.name}" on SteamGridDB.` }
-    }
 
     return { ok: true, game: await toEntry(game) }
   })
 
   /**
-   * Fetch art for every game that doesn't already have cached art.
-   * Fires-and-forgets in the background — returns immediately with a count.
-   * The UI should reload the library after a delay or on focus.
+   * Fetch art for all games lacking cached art.
+   * Pushes art:progress events to the renderer as each game completes,
+   * then art:done when the batch is finished.
    */
   ipcMain.handle('games:fetch-art-all', async (): Promise<{ ok: boolean; queued: number }> => {
     const { steamGridDbApiKey } = loadSettings()
@@ -1053,20 +1119,30 @@ app.whenReady().then(() => {
       const { cover, hero } = cachedArtPaths(g.id)
       return !g.cover && !cover && !hero
     })
+    if (needsArt.length === 0) return { ok: true, queued: 0 }
 
-    // Run in background — don't await.
     void (async () => {
+      const dir = artCacheDir()
+      let done = 0
+      const total = needsArt.length
+
       for (const game of needsArt) {
-        const { coverUrl, heroUrl } = await fetchSgdbArt(
-          game.id,
-          game.name,
-          game.uri,
-          steamGridDbApiKey
-        )
-        const dir = artCacheDir()
+        const { coverUrl, heroUrl } = await fetchSgdbArt(game.name, game.uri, steamGridDbApiKey)
         if (coverUrl) await downloadAndCache(coverUrl, join(dir, `${game.id}-cover.png`))
         if (heroUrl) await downloadAndCache(heroUrl, join(dir, `${game.id}-hero.png`))
+        done++
+
+        const event: ArtProgressEvent = {
+          id: game.id,
+          name: game.name,
+          done,
+          total,
+          ok: !!(coverUrl || heroUrl)
+        }
+        BrowserWindow.getAllWindows()[0]?.webContents.send('art:progress', event)
       }
+
+      BrowserWindow.getAllWindows()[0]?.webContents.send('art:done')
     })()
 
     return { ok: true, queued: needsArt.length }
@@ -1076,13 +1152,10 @@ app.whenReady().then(() => {
 
   ipcMain.handle('playtime:get', (_e, id: unknown): PlayRecord | null => {
     if (typeof id !== 'string' || !id.trim()) return null
-    const map = loadPlaytime()
-    return map[id] ?? null
+    return loadPlaytime()[id] ?? null
   })
 
-  ipcMain.handle('playtime:get-all', (): PlaytimeMap => {
-    return loadPlaytime()
-  })
+  ipcMain.handle('playtime:get-all', (): PlaytimeMap => loadPlaytime())
 
   createWindow()
   app.on('activate', () => {

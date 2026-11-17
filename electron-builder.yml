@@ -1,5 +1,5 @@
-appId: com.electron.app
-productName: game-launcher
+appId: com.skylauncher.app
+productName: Sky Launcher
 directories:
   buildResources: build
 files:
@@ -12,9 +12,9 @@ files:
 asarUnpack:
   - resources/**
 win:
-  executableName: game-launcher
+  executableName: SkyLauncher
 nsis:
-  artifactName: ${name}-${version}-setup.${ext}
+  artifactName: ${productName}-${version}-setup.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always

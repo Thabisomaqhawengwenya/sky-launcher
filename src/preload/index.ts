@@ -6,6 +6,7 @@ const api = {
   // ── Read ──────────────────────────────────────────────────────────────────
   listGames: () => ipcRenderer.invoke('games:list'),
   getStatus: () => ipcRenderer.invoke('games:status'),
+  getVersion: () => ipcRenderer.invoke('app:version'),
 
   // ── Launch + reveal ───────────────────────────────────────────────────────
   launchGame: (id: string) => ipcRenderer.invoke('games:launch', id),
@@ -36,7 +37,43 @@ const api = {
 
   // ── Play time ─────────────────────────────────────────────────────────────
   getPlaytime: (id: string) => ipcRenderer.invoke('playtime:get', id),
-  getAllPlaytime: () => ipcRenderer.invoke('playtime:get-all')
+  getAllPlaytime: () => ipcRenderer.invoke('playtime:get-all'),
+
+  // ── Push event subscriptions ─────────────────────────────────────────────
+  // These return an unsubscribe function so the UI can clean up.
+
+  /** Called when games.json changes on disk (e.g. user edits it in a text editor). */
+  onLibraryChanged: (cb: () => void) => {
+    const handler = (): void => cb()
+    ipcRenderer.on('library:changed', handler)
+    return () => ipcRenderer.removeListener('library:changed', handler)
+  },
+
+  /** Called after each game completes in a fetchArtAll() batch. */
+  onArtProgress: (
+    cb: (event: { id: string; name: string; done: number; total: number; ok: boolean }) => void
+  ) => {
+    const handler = (
+      _e: Electron.IpcRendererEvent,
+      data: { id: string; name: string; done: number; total: number; ok: boolean }
+    ): void => cb(data)
+    ipcRenderer.on('art:progress', handler)
+    return () => ipcRenderer.removeListener('art:progress', handler)
+  },
+
+  /** Called once when a fetchArtAll() batch finishes. */
+  onArtDone: (cb: () => void) => {
+    const handler = (): void => cb()
+    ipcRenderer.on('art:done', handler)
+    return () => ipcRenderer.removeListener('art:done', handler)
+  },
+
+  /** Called when a tracked game process exits so play time can be refreshed. */
+  onPlaytimeUpdated: (cb: (id: string) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, id: string): void => cb(id)
+    ipcRenderer.on('playtime:updated', handler)
+    return () => ipcRenderer.removeListener('playtime:updated', handler)
+  }
 }
 
 contextBridge.exposeInMainWorld('electron', electronAPI)
