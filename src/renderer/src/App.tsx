@@ -58,6 +58,16 @@ function App(): React.JSX.Element {
   const busy = useRef(false)
 
   const loadLibrary = useCallback(async () => {
+    if (!window.api) {
+      setStatus({
+        ok: false,
+        games: [],
+        error:
+          'Open Sky Launcher in the Electron window (npm run dev) to access your local game library.',
+        warnings: []
+      })
+      return
+    }
     try {
       const next = await window.api.getStatus()
       setStatus(next)
@@ -74,8 +84,17 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     let active = true
-    window.api
-      .getStatus()
+    const fetchStatus = window.api
+      ? window.api.getStatus()
+      : Promise.resolve<LibraryStatus>({
+          ok: false,
+          games: [],
+          error:
+            'Open Sky Launcher in the Electron window (npm run dev) to access your local game library.',
+          warnings: []
+        })
+
+    fetchStatus
       .then((next) => {
         if (!active) return
         setStatus(next)
@@ -149,6 +168,7 @@ function App(): React.JSX.Element {
   }, [])
 
   const openGamesFile = useCallback(async () => {
+    if (!window.api) return
     await window.api.openGamesFile()
   }, [])
 
