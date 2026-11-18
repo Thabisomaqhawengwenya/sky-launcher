@@ -38,7 +38,6 @@ export function SettingsModal({
 }: SettingsModalProps): React.JSX.Element {
   const [tab, setTab] = useState<SettingsTab>('appearance')
   const [apiKey, setApiKey] = useState('')
-  const [showKey, setShowKey] = useState(false)
   const [minimizeOnLaunch, setMinimizeOnLaunch] = useState(true)
   const [autoBackupSaves, setAutoBackupSaves] = useState(false)
   const [fbApiKey, setFbApiKey] = useState('')
@@ -312,42 +311,17 @@ export function SettingsModal({
             </div>
           ) : tab === 'artwork' ? (
             <div className="sheet-fields">
-              <div className="sheet-row">
+              <label className="sheet-row">
                 <span className="sheet-label">SteamGridDB API key</span>
-                <div className="password-wrap">
-                  <input
-                    type={showKey ? 'text' : 'password'}
-                    className="sheet-input"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    placeholder="Paste key from steamgriddb.com"
-                    autoComplete="off"
-                  />
-                  <button
-                    type="button"
-                    className="eye-toggle"
-                    onClick={() => setShowKey((prev) => !prev)}
-                    aria-label={showKey ? 'Hide API key' : 'Show API key'}
-                  >
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                      <path
-                        d={
-                          showKey
-                            ? 'M3 3l18 18M10.58 10.58A2 2 0 0 0 13.42 13.42M9.88 5.09A10.94 10.94 0 0 1 12 4.91c5 0 9.27 3.11 11 7.09a11.72 11.72 0 0 1-3.16 4.35M6.61 6.61A11.83 11.83 0 0 0 1 12c1.73 3.98 6 7.09 11 7.09 1.61 0 3.14-.32 4.5-.9'
-                            : 'M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12Z'
-                        }
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                      {!showKey && (
-                        <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
-                      )}
-                    </svg>
-                  </button>
-                </div>
-              </div>
+                <input
+                  type="password"
+                  className="sheet-input"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  placeholder="Paste key from steamgriddb.com"
+                  autoComplete="off"
+                />
+              </label>
 
               <div className="sheet-row">
                 <span className="sheet-label">Batch artwork download</span>
@@ -436,11 +410,12 @@ export function SettingsModal({
               <label className="sheet-row">
                 <span className="sheet-label">Firebase Web API key</span>
                 <input
-                  type="text"
+                  type="password"
                   className="sheet-input"
                   value={fbApiKey}
                   onChange={(e) => setFbApiKey(e.target.value)}
-                  placeholder="AIzaSy..."
+                  placeholder="Paste Firebase Web API key"
+                  autoComplete="off"
                 />
               </label>
 
