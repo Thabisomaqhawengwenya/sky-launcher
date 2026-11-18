@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { Settings } from '../../../preload/index.d'
-import type { UserProfile } from './ProfileModal'
+import type { AuthUser, Settings } from '../../../preload/index.d'
 
 export type LauncherLayout = 'ps5' | 'grid'
 export type TileScale = 'compact' | 'standard' | 'large'
@@ -19,7 +18,7 @@ type SettingsTab = 'appearance' | 'artwork' | 'system' | 'account'
 type SettingsModalProps = {
   warnings: string[]
   prefs: UiPreferences
-  user: UserProfile | null
+  user: AuthUser | null
   onUpdatePrefs: (patch: Partial<UiPreferences>) => void
   onOpenProfile: () => void
   onOpenGamesFile: () => Promise<void>
@@ -41,6 +40,10 @@ export function SettingsModal({
   const [apiKey, setApiKey] = useState('')
   const [showKey, setShowKey] = useState(false)
   const [minimizeOnLaunch, setMinimizeOnLaunch] = useState(true)
+  const [autoBackupSaves, setAutoBackupSaves] = useState(false)
+  const [fbApiKey, setFbApiKey] = useState('')
+  const [fbProjectId, setFbProjectId] = useState('')
+  const [fbStorageBucket, setFbStorageBucket] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [artStatus, setArtStatus] = useState('')
@@ -64,6 +67,10 @@ export function SettingsModal({
         if (!active) return
         setApiKey(s.steamGridDbApiKey ?? '')
         setMinimizeOnLaunch(s.minimizeOnLaunch ?? true)
+        setAutoBackupSaves(s.autoBackupSaves ?? false)
+        setFbApiKey(s.firebase?.apiKey ?? '')
+        setFbProjectId(s.firebase?.projectId ?? '')
+        setFbStorageBucket(s.firebase?.storageBucket ?? '')
         setLoading(false)
       })
       .catch(() => {
@@ -87,9 +94,20 @@ export function SettingsModal({
     setError('')
     setMessage('')
     try {
+      const firebaseConfigured = fbApiKey.trim() && fbProjectId.trim() && fbStorageBucket.trim()
       const res = await window.api.setSettings({
         steamGridDbApiKey: apiKey.trim(),
-        minimizeOnLaunch
+        minimizeOnLaunch,
+        autoBackupSaves,
+        ...(firebaseConfigured
+          ? {
+              firebase: {
+                apiKey: fbApiKey.trim(),
+                projectId: fbProjectId.trim(),
+                storageBucket: fbStorageBucket.trim()
+              }
+            }
+          : {})
       })
       if (!res.ok) {
         setError(res.error ?? 'Could not save settings.')
@@ -294,24 +312,40 @@ export function SettingsModal({
           ) : tab === 'artwork' ? (
             <div className="sheet-fields">
               <div className="sheet-row">
-                <div className="sheet-row-head">
-                  <span className="sheet-label">SteamGridDB API key</span>
+                <span className="sheet-label">SteamGridDB API key</span>
+                <div className="password-wrap">
+                  <input
+                    type={showKey ? 'text' : 'password'}
+                    className="sheet-input"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder="Paste key from steamgriddb.com"
+                    autoComplete="off"
+                  />
                   <button
                     type="button"
-                    className="inline-link"
+                    className="eye-toggle"
                     onClick={() => setShowKey((prev) => !prev)}
+                    aria-label={showKey ? 'Hide API key' : 'Show API key'}
                   >
-                    {showKey ? 'Hide' : 'Show'}
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path
+                        d={
+                          showKey
+                            ? 'M3 3l18 18M10.58 10.58A2 2 0 0 0 13.42 13.42M9.88 5.09A10.94 10.94 0 0 1 12 4.91c5 0 9.27 3.11 11 7.09a11.72 11.72 0 0 1-3.16 4.35M6.61 6.61A11.83 11.83 0 0 0 1 12c1.73 3.98 6 7.09 11 7.09 1.61 0 3.14-.32 4.5-.9'
+                            : 'M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12Z'
+                        }
+                        stroke="currentColor"
+                        strokeWidth="1.8"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      {!showKey && (
+                        <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
+                      )}
+                    </svg>
                   </button>
                 </div>
-                <input
-                  type={showKey ? 'text' : 'password'}
-                  className="sheet-input"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="Paste key from steamgriddb.com"
-                  autoComplete="off"
-                />
               </div>
 
               <div className="sheet-row">
@@ -389,18 +423,67 @@ export function SettingsModal({
             <div className="sheet-fields">
               <div className="profile-info-card">
                 <div className="profile-info-row">
-                  <span className="sheet-label">Active profile</span>
-                  <span>{user ? `${user.displayName} (${user.email})` : 'Guest (Local only)'}</span>
+                  <span className="sheet-label">Active account</span>
+                  <span>{user ? user.email : 'Not signed in'}</span>
                 </div>
                 <div className="profile-info-row">
-                  <span className="sheet-label">Cloud saves (Firebase)</span>
-                  <span className="option-hint">Pending Phase 8 backend</span>
+                  <span className="sheet-label">Firebase project</span>
+                  <span className="option-hint">{fbProjectId || 'Not configured'}</span>
                 </div>
               </div>
 
+              <label className="sheet-row">
+                <span className="sheet-label">Firebase Web API key</span>
+                <input
+                  type="text"
+                  className="sheet-input"
+                  value={fbApiKey}
+                  onChange={(e) => setFbApiKey(e.target.value)}
+                  placeholder="AIzaSy..."
+                />
+              </label>
+
+              <div className="layout-grid">
+                <label className="sheet-row">
+                  <span className="sheet-label">Project ID</span>
+                  <input
+                    type="text"
+                    className="sheet-input"
+                    value={fbProjectId}
+                    onChange={(e) => setFbProjectId(e.target.value)}
+                    placeholder="my-sky-launcher"
+                  />
+                </label>
+
+                <label className="sheet-row">
+                  <span className="sheet-label">Storage bucket</span>
+                  <input
+                    type="text"
+                    className="sheet-input"
+                    value={fbStorageBucket}
+                    onChange={(e) => setFbStorageBucket(e.target.value)}
+                    placeholder="my-sky-launcher.appspot.com"
+                  />
+                </label>
+              </div>
+
+              <label className="toggle-row">
+                <span>
+                  <span className="toggle-title">Auto-backup game saves on exit</span>
+                  <span className="toggle-sub">
+                    Uploads save folder to Firebase Storage when game closes
+                  </span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={autoBackupSaves}
+                  onChange={(e) => setAutoBackupSaves(e.target.checked)}
+                />
+              </label>
+
               <div className="action-row">
-                <button type="button" className="btn btn-primary" onClick={onOpenProfile}>
-                  {user ? 'Manage account' : 'Sign in / Create account'}
+                <button type="button" className="btn btn-secondary" onClick={onOpenProfile}>
+                  {user ? 'Manage account & sync' : 'Sign in / Create account'}
                 </button>
               </div>
             </div>
@@ -414,7 +497,7 @@ export function SettingsModal({
           {message && <div className="ok-box">{message}</div>}
 
           <div className="sheet-footer">
-            {(tab === 'artwork' || tab === 'system') && (
+            {(tab === 'artwork' || tab === 'system' || tab === 'account') && (
               <button type="submit" className="btn btn-primary" disabled={saving || loading}>
                 {saving ? 'Saving...' : 'Save settings'}
               </button>

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { GameEntry, LibraryStatus, PlaytimeMap } from '../../preload/index.d'
+import type { AuthUser, GameEntry, LibraryStatus, PlaytimeMap } from '../../preload/index.d'
 import { GameFormModal } from './components/GameFormModal'
-import { ProfileModal, type UserProfile } from './components/ProfileModal'
+import { ProfileModal } from './components/ProfileModal'
 import { ScanModal } from './components/ScanModal'
 import { SettingsModal, type UiPreferences } from './components/SettingsModal'
 
@@ -11,7 +11,6 @@ type LibraryFilter = 'all' | 'recent' | 'favorites'
 const FILTER_ORDER: LibraryFilter[] = ['all', 'recent', 'favorites']
 const FAV_STORAGE_KEY = 'sky_launcher_favorites_v1'
 const PREFS_STORAGE_KEY = 'sky_launcher_prefs_v1'
-const USER_STORAGE_KEY = 'sky_launcher_user_v1'
 
 const DEFAULT_PREFS: UiPreferences = {
   layout: 'ps5',
@@ -28,15 +27,6 @@ function loadPrefs(): UiPreferences {
     return { ...DEFAULT_PREFS, ...JSON.parse(raw) }
   } catch {
     return DEFAULT_PREFS
-  }
-}
-
-function loadUser(): UserProfile | null {
-  try {
-    const raw = localStorage.getItem(USER_STORAGE_KEY)
-    return raw ? (JSON.parse(raw) as UserProfile) : null
-  } catch {
-    return null
   }
 }
 
@@ -141,7 +131,8 @@ function App(): React.JSX.Element {
   const [searchQuery, setSearchQuery] = useState('')
   const [favorites, setFavorites] = useState<string[]>(() => loadFavorites())
   const [prefs, setPrefs] = useState<UiPreferences>(() => loadPrefs())
-  const [user, setUser] = useState<UserProfile | null>(() => loadUser())
+  const [user, setUser] = useState<AuthUser | null>(null)
+  const [saveBusy, setSaveBusy] = useState(false)
   const soundEnabled = prefs.soundEnabled
 
   const [index, setIndex] = useState(0)
@@ -272,9 +263,10 @@ function App(): React.JSX.Element {
     const fetchInitial = window.api
       ? Promise.all([
           window.api.getStatus(),
-          window.api.getAllPlaytime().catch(() => ({}) as PlaytimeMap)
+          window.api.getAllPlaytime().catch(() => ({}) as PlaytimeMap),
+          window.api.getAuthUser().catch(() => null)
         ])
-      : Promise.resolve<[LibraryStatus, PlaytimeMap]>([
+      : Promise.resolve<[LibraryStatus, PlaytimeMap, AuthUser | null]>([
           {
             ok: false,
             games: [],
@@ -282,14 +274,16 @@ function App(): React.JSX.Element {
               'You are viewing the Vite web preview in a browser. Switch to the Sky Launcher Electron desktop window to scan your laptop, open games.json, and launch games.',
             warnings: []
           },
-          {}
+          {},
+          null
         ])
 
     fetchInitial
-      .then(([next, pt]) => {
+      .then(([next, pt, authUser]) => {
         if (!active) return
         setStatus(next)
         setPlaytime(pt)
+        setUser(authUser)
         setIndex((i) => Math.min(i, Math.max(next.games.length - 1, 0)))
       })
       .catch(() => {
@@ -350,6 +344,38 @@ function App(): React.JSX.Element {
     })
   }, [])
 
+  const handleBackupSave = useCallback(async () => {
+    const game = latest.current.games[latest.current.index]
+    if (!game || !window.api) return
+    setSaveBusy(true)
+    setLaunchError('')
+    try {
+      const res = await window.api.backupGameSave(game.id)
+      if (!res.ok) setLaunchError(res.error ?? 'Could not back up game save.')
+    } catch {
+      setLaunchError('Could not back up game save.')
+    } finally {
+      setSaveBusy(false)
+      closeModal()
+    }
+  }, [closeModal])
+
+  const handleRestoreSave = useCallback(async () => {
+    const game = latest.current.games[latest.current.index]
+    if (!game || !window.api) return
+    setSaveBusy(true)
+    setLaunchError('')
+    try {
+      const res = await window.api.restoreGameSave(game.id)
+      if (!res.ok) setLaunchError(res.error ?? 'Could not restore game save.')
+    } catch {
+      setLaunchError('Could not restore game save.')
+    } finally {
+      setSaveBusy(false)
+      closeModal()
+    }
+  }, [closeModal])
+
   const handleUpdatePrefs = useCallback((patch: Partial<UiPreferences>) => {
     setPrefs((prev) => {
       const next = { ...prev, ...patch }
@@ -360,24 +386,6 @@ function App(): React.JSX.Element {
       }
       return next
     })
-  }, [])
-
-  const handleSignIn = useCallback((nextUser: UserProfile) => {
-    setUser(nextUser)
-    try {
-      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(nextUser))
-    } catch {
-      // Ignore storage errors
-    }
-  }, [])
-
-  const handleSignOut = useCallback(() => {
-    setUser(null)
-    try {
-      localStorage.removeItem(USER_STORAGE_KEY)
-    } catch {
-      // Ignore storage errors
-    }
   }, [])
 
   const cycleFilter = useCallback((dir: 1 | -1) => {
@@ -688,7 +696,7 @@ function App(): React.JSX.Element {
   const backdropArt = game?.hero ?? game?.cover
   const gamePlayRecord = game ? playtime[game.id] : undefined
   const isFavorite = game ? favorites.includes(game.id) : false
-  const accent = game?.color ?? '#2f6bff'
+  const accent = game?.color ?? game?.autoColor ?? '#2f6bff'
   const clock = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
   const isErrorState = status !== null && !status.ok
   const isEmptyLibrary = status !== null && status.ok && allGames.length === 0
@@ -886,12 +894,10 @@ function App(): React.JSX.Element {
             type="button"
             className={`profile-pill ${user ? 'signed-in' : ''}`}
             onClick={() => setActiveModal('profile')}
-            title={
-              user ? `${user.displayName} — Account & Cloud Saves` : 'Sign in / Create account'
-            }
+            title={user ? `${user.email} — Account & Cloud Saves` : 'Sign in / Create account'}
             aria-label="Player profile"
           >
-            {user ? user.displayName.slice(0, 2).toUpperCase() : 'Sign in'}
+            {user ? user.email.slice(0, 2).toUpperCase() : 'Sign in'}
           </button>
 
           <span className="clock">{clock}</span>
@@ -1380,8 +1386,31 @@ function App(): React.JSX.Element {
                 onClick={() => setActiveModal('edit')}
               >
                 <span>Edit game details</span>
-                <span className="option-hint">Title, target, cover, accent</span>
+                <span className="option-hint">Title, target, save folder, cover</span>
               </button>
+
+              {game.hasSavePath && (
+                <>
+                  <button
+                    type="button"
+                    className="option-row-btn"
+                    onClick={() => void handleBackupSave()}
+                    disabled={saveBusy}
+                  >
+                    <span>{saveBusy ? 'Working...' : 'Back up save to cloud'}</span>
+                    <span className="option-hint">Firebase Storage</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="option-row-btn"
+                    onClick={() => void handleRestoreSave()}
+                    disabled={saveBusy}
+                  >
+                    <span>Restore save from cloud</span>
+                    <span className="option-hint">Overwrites local save folder</span>
+                  </button>
+                </>
+              )}
 
               {!confirmRemove ? (
                 <button
@@ -1436,8 +1465,8 @@ function App(): React.JSX.Element {
       {activeModal === 'profile' && (
         <ProfileModal
           user={user}
-          onSignIn={handleSignIn}
-          onSignOut={handleSignOut}
+          onAuthChange={setUser}
+          onSynced={loadLibrary}
           onClose={closeModal}
         />
       )}

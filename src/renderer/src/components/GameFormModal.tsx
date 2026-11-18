@@ -27,6 +27,7 @@ export function GameFormModal({
   const [exePath, setExePath] = useState<string | null>(null)
   const [uri, setUri] = useState('')
   const [argsText, setArgsText] = useState('')
+  const [savePath, setSavePath] = useState<string | null>(null)
   const [coverPath, setCoverPath] = useState<string | null>(null)
   const [color, setColor] = useState(initialGame?.color ?? '#2f6bff')
   const [saving, setSaving] = useState(false)
@@ -55,6 +56,18 @@ export function GameFormModal({
     const picked = await window.api.pickCover()
     if (picked) {
       setCoverPath(picked)
+      setError('')
+    }
+  }
+
+  const handlePickSaveFolder = async (): Promise<void> => {
+    if (!window.api) {
+      setError('Folder picker requires the Electron desktop window.')
+      return
+    }
+    const picked = await window.api.pickFolder()
+    if (picked) {
+      setSavePath(picked)
       setError('')
     }
   }
@@ -89,6 +102,7 @@ export function GameFormModal({
               ...(exePath ? { exe: exePath } : {}),
               ...(trimmedUri ? { uri: trimmedUri } : {}),
               ...(parsedArgs.length > 0 ? { args: parsedArgs } : {}),
+              ...(savePath ? { savePath } : {}),
               ...(coverPath ? { cover: coverPath } : {}),
               color
             })
@@ -97,6 +111,7 @@ export function GameFormModal({
               ...(exePath ? { exe: exePath } : {}),
               ...(trimmedUri ? { uri: trimmedUri } : {}),
               ...(parsedArgs.length > 0 ? { args: parsedArgs } : {}),
+              ...(savePath ? { savePath } : {}),
               ...(coverPath ? { cover: coverPath } : {}),
               color
             })
@@ -239,6 +254,26 @@ export function GameFormModal({
                 placeholder="e.g. -fullscreen -dx12"
               />
             </label>
+
+            <div className="sheet-row">
+              <span className="sheet-label">Save-data folder (for cloud backups)</span>
+              <div className="sheet-file-bar">
+                <span className="sheet-file-name">
+                  {savePath
+                    ? fileLabel(savePath)
+                    : initialGame?.hasSavePath
+                      ? 'Save folder configured'
+                      : 'Not set'}
+                </span>
+                <button
+                  type="button"
+                  className="sheet-browse-btn"
+                  onClick={() => void handlePickSaveFolder()}
+                >
+                  Choose folder
+                </button>
+              </div>
+            </div>
 
             <div className="sheet-row">
               <span className="sheet-label">Accent</span>
