@@ -1,10 +1,27 @@
 import { useEffect, useState } from 'react'
 import type { Settings } from '../../../preload/index.d'
+import type { UserProfile } from './ProfileModal'
+
+export type LauncherLayout = 'ps5' | 'grid'
+export type TileScale = 'compact' | 'standard' | 'large'
+export type BackdropBlur = 'low' | 'medium' | 'high'
+
+export type UiPreferences = {
+  layout: LauncherLayout
+  tileScale: TileScale
+  backdropBlur: BackdropBlur
+  showLegend: boolean
+  soundEnabled: boolean
+}
+
+type SettingsTab = 'appearance' | 'artwork' | 'system' | 'account'
 
 type SettingsModalProps = {
   warnings: string[]
-  soundEnabled: boolean
-  onToggleSound: (enabled: boolean) => void
+  prefs: UiPreferences
+  user: UserProfile | null
+  onUpdatePrefs: (patch: Partial<UiPreferences>) => void
+  onOpenProfile: () => void
   onOpenGamesFile: () => Promise<void>
   onReloadLibrary: () => Promise<void>
   onClose: () => void
@@ -12,12 +29,15 @@ type SettingsModalProps = {
 
 export function SettingsModal({
   warnings,
-  soundEnabled,
-  onToggleSound,
+  prefs,
+  user,
+  onUpdatePrefs,
+  onOpenProfile,
   onOpenGamesFile,
   onReloadLibrary,
   onClose
 }: SettingsModalProps): React.JSX.Element {
+  const [tab, setTab] = useState<SettingsTab>('appearance')
   const [apiKey, setApiKey] = useState('')
   const [showKey, setShowKey] = useState(false)
   const [minimizeOnLaunch, setMinimizeOnLaunch] = useState(true)
@@ -57,10 +77,10 @@ export function SettingsModal({
     }
   }, [])
 
-  const handleSave = async (e: React.FormEvent): Promise<void> => {
+  const handleSaveSystem = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault()
     if (!window.api) {
-      setError('Saving settings requires the Electron desktop window.')
+      setError('Saving system settings requires the Electron desktop window.')
       return
     }
     setSaving(true)
@@ -117,53 +137,57 @@ export function SettingsModal({
       className="modal-backdrop"
       role="dialog"
       aria-modal="true"
-      aria-label="Settings and library"
+      aria-label="Settings"
       onClick={onClose}
     >
       <form
         className="console-sheet settings-sheet"
         onClick={(e) => e.stopPropagation()}
-        onSubmit={(e) => void handleSave(e)}
+        onSubmit={(e) => void handleSaveSystem(e)}
       >
-        <div className="sheet-preview settings-aside">
-          <div className="settings-aside-icon">
-            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
-              <path
-                d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"
-                stroke="currentColor"
-                strokeWidth="1.6"
-              />
-            </svg>
-          </div>
-          <h3>Sky Launcher</h3>
-          <p className="settings-aside-copy">
-            Configure SteamGridDB artwork, launch behaviour, and library diagnostics.
-          </p>
-
-          <div className="settings-aside-actions">
-            <button
-              type="button"
-              className="sheet-cover-trigger"
-              onClick={() => void handleFetchAllArt()}
-            >
-              Fetch missing artwork
-            </button>
-            <button
-              type="button"
-              className="sheet-cover-trigger"
-              onClick={() => void onOpenGamesFile()}
-            >
-              Open games.json
-            </button>
-          </div>
-
-          {artStatus && <p className="settings-aside-status">{artStatus}</p>}
-        </div>
+        <nav className="settings-nav" aria-label="Settings categories">
+          <div className="settings-nav-title">Settings</div>
+          <button
+            type="button"
+            className={`settings-nav-item ${tab === 'appearance' ? 'active' : ''}`}
+            onClick={() => setTab('appearance')}
+          >
+            Appearance &amp; Layouts
+          </button>
+          <button
+            type="button"
+            className={`settings-nav-item ${tab === 'artwork' ? 'active' : ''}`}
+            onClick={() => setTab('artwork')}
+          >
+            Artwork &amp; Media
+          </button>
+          <button
+            type="button"
+            className={`settings-nav-item ${tab === 'system' ? 'active' : ''}`}
+            onClick={() => setTab('system')}
+          >
+            Launch &amp; Library
+          </button>
+          <button
+            type="button"
+            className={`settings-nav-item ${tab === 'account' ? 'active' : ''}`}
+            onClick={() => setTab('account')}
+          >
+            Account &amp; Cloud Saves
+          </button>
+        </nav>
 
         <div className="sheet-body">
           <div className="modal-header">
-            <h2>Settings &amp; Library</h2>
+            <h2>
+              {tab === 'appearance'
+                ? 'Appearance & Layouts'
+                : tab === 'artwork'
+                  ? 'Artwork & Media'
+                  : tab === 'system'
+                    ? 'Launch & Library'
+                    : 'Account & Cloud Saves'}
+            </h2>
             <button type="button" className="close-btn" onClick={onClose} aria-label="Close">
               Esc / B
             </button>
@@ -176,7 +200,98 @@ export function SettingsModal({
               <div className="skeleton-box skeleton-toggle" />
               <div className="skeleton-box skeleton-toggle" />
             </div>
-          ) : (
+          ) : tab === 'appearance' ? (
+            <div className="sheet-fields">
+              <div className="sheet-row">
+                <span className="sheet-label">Home layout</span>
+                <div className="layout-grid">
+                  <button
+                    type="button"
+                    className={`layout-card ${prefs.layout === 'ps5' ? 'active' : ''}`}
+                    onClick={() => onUpdatePrefs({ layout: 'ps5' })}
+                    aria-pressed={prefs.layout === 'ps5'}
+                  >
+                    <div className="layout-thumb layout-thumb-ps5">
+                      <span className="lt-row">
+                        <i />
+                        <i />
+                        <i />
+                      </span>
+                      <span className="lt-hero" />
+                    </div>
+                    <span className="layout-name">PS5 Home</span>
+                    <span className="layout-desc">Top ribbon + hero stage</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    className={`layout-card ${prefs.layout === 'grid' ? 'active' : ''}`}
+                    onClick={() => onUpdatePrefs({ layout: 'grid' })}
+                    aria-pressed={prefs.layout === 'grid'}
+                  >
+                    <div className="layout-thumb layout-thumb-grid">
+                      <i />
+                      <i />
+                      <i />
+                      <i />
+                      <i />
+                      <i />
+                    </div>
+                    <span className="layout-name">Compact Grid</span>
+                    <span className="layout-desc">Multi-column library grid</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="sheet-row">
+                <div className="sheet-row-head">
+                  <span className="sheet-label">Tile size</span>
+                  <div className="segmented">
+                    {(['compact', 'standard', 'large'] as TileScale[]).map((size) => (
+                      <button
+                        key={size}
+                        type="button"
+                        className={`seg-btn ${prefs.tileScale === size ? 'active' : ''}`}
+                        onClick={() => onUpdatePrefs({ tileScale: size })}
+                      >
+                        {size[0].toUpperCase() + size.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="sheet-row">
+                <div className="sheet-row-head">
+                  <span className="sheet-label">Backdrop blur</span>
+                  <div className="segmented">
+                    {(['low', 'medium', 'high'] as BackdropBlur[]).map((level) => (
+                      <button
+                        key={level}
+                        type="button"
+                        className={`seg-btn ${prefs.backdropBlur === level ? 'active' : ''}`}
+                        onClick={() => onUpdatePrefs({ backdropBlur: level })}
+                      >
+                        {level[0].toUpperCase() + level.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <label className="toggle-row">
+                <span>
+                  <span className="toggle-title">Show bottom controls legend</span>
+                  <span className="toggle-sub">Display keyboard and controller hints</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={prefs.showLegend}
+                  onChange={(e) => onUpdatePrefs({ showLegend: e.target.checked })}
+                />
+              </label>
+            </div>
+          ) : tab === 'artwork' ? (
             <div className="sheet-fields">
               <div className="sheet-row">
                 <div className="sheet-row-head">
@@ -199,6 +314,24 @@ export function SettingsModal({
                 />
               </div>
 
+              <div className="sheet-row">
+                <span className="sheet-label">Batch artwork download</span>
+                <div className="sheet-file-bar">
+                  <span className="sheet-file-name">
+                    {artStatus || 'Download covers & wide hero art for games without cached art'}
+                  </span>
+                  <button
+                    type="button"
+                    className="sheet-browse-btn"
+                    onClick={() => void handleFetchAllArt()}
+                  >
+                    Fetch missing art
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : tab === 'system' ? (
+            <div className="sheet-fields">
               <label className="toggle-row">
                 <span>
                   <span className="toggle-title">Minimize launcher on game launch</span>
@@ -222,14 +355,28 @@ export function SettingsModal({
                 </span>
                 <input
                   type="checkbox"
-                  checked={soundEnabled}
-                  onChange={(e) => onToggleSound(e.target.checked)}
+                  checked={prefs.soundEnabled}
+                  onChange={(e) => onUpdatePrefs({ soundEnabled: e.target.checked })}
                 />
               </label>
 
+              <div className="sheet-row">
+                <span className="sheet-label">Library file</span>
+                <div className="sheet-file-bar">
+                  <span className="sheet-file-name">games.json in %APPDATA%\sky-launcher</span>
+                  <button
+                    type="button"
+                    className="sheet-browse-btn"
+                    onClick={() => void onOpenGamesFile()}
+                  >
+                    Open folder
+                  </button>
+                </div>
+              </div>
+
               {warnings.length > 0 && (
                 <div className="warnings-box">
-                  <h3>Skipped games.json entries ({warnings.length})</h3>
+                  <h3>Skipped entries ({warnings.length})</h3>
                   <ul>
                     {warnings.map((w, i) => (
                       <li key={i}>{w}</li>
@@ -237,6 +384,25 @@ export function SettingsModal({
                   </ul>
                 </div>
               )}
+            </div>
+          ) : (
+            <div className="sheet-fields">
+              <div className="profile-info-card">
+                <div className="profile-info-row">
+                  <span className="sheet-label">Active profile</span>
+                  <span>{user ? `${user.displayName} (${user.email})` : 'Guest (Local only)'}</span>
+                </div>
+                <div className="profile-info-row">
+                  <span className="sheet-label">Cloud saves (Firebase)</span>
+                  <span className="option-hint">Pending Phase 8 backend</span>
+                </div>
+              </div>
+
+              <div className="action-row">
+                <button type="button" className="btn btn-primary" onClick={onOpenProfile}>
+                  {user ? 'Manage account' : 'Sign in / Create account'}
+                </button>
+              </div>
             </div>
           )}
 
@@ -248,9 +414,11 @@ export function SettingsModal({
           {message && <div className="ok-box">{message}</div>}
 
           <div className="sheet-footer">
-            <button type="submit" className="btn btn-primary" disabled={saving || loading}>
-              {saving ? 'Saving...' : 'Save settings'}
-            </button>
+            {(tab === 'artwork' || tab === 'system') && (
+              <button type="submit" className="btn btn-primary" disabled={saving || loading}>
+                {saving ? 'Saving...' : 'Save settings'}
+              </button>
+            )}
             <button type="button" className="btn btn-secondary" onClick={onClose}>
               Close
             </button>

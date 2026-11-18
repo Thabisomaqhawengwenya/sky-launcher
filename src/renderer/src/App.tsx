@@ -1,15 +1,44 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { GameEntry, LibraryStatus, PlaytimeMap } from '../../preload/index.d'
 import { GameFormModal } from './components/GameFormModal'
+import { ProfileModal, type UserProfile } from './components/ProfileModal'
 import { ScanModal } from './components/ScanModal'
-import { SettingsModal } from './components/SettingsModal'
+import { SettingsModal, type UiPreferences } from './components/SettingsModal'
 
-type ActiveModal = 'none' | 'settings' | 'game-options' | 'add' | 'edit' | 'scan'
+type ActiveModal = 'none' | 'settings' | 'profile' | 'game-options' | 'add' | 'edit' | 'scan'
 type LibraryFilter = 'all' | 'recent' | 'favorites'
 
 const FILTER_ORDER: LibraryFilter[] = ['all', 'recent', 'favorites']
 const FAV_STORAGE_KEY = 'sky_launcher_favorites_v1'
-const SOUND_STORAGE_KEY = 'sky_launcher_sound_v1'
+const PREFS_STORAGE_KEY = 'sky_launcher_prefs_v1'
+const USER_STORAGE_KEY = 'sky_launcher_user_v1'
+
+const DEFAULT_PREFS: UiPreferences = {
+  layout: 'ps5',
+  tileScale: 'standard',
+  backdropBlur: 'medium',
+  showLegend: true,
+  soundEnabled: true
+}
+
+function loadPrefs(): UiPreferences {
+  try {
+    const raw = localStorage.getItem(PREFS_STORAGE_KEY)
+    if (!raw) return DEFAULT_PREFS
+    return { ...DEFAULT_PREFS, ...JSON.parse(raw) }
+  } catch {
+    return DEFAULT_PREFS
+  }
+}
+
+function loadUser(): UserProfile | null {
+  try {
+    const raw = localStorage.getItem(USER_STORAGE_KEY)
+    return raw ? (JSON.parse(raw) as UserProfile) : null
+  } catch {
+    return null
+  }
+}
 
 function moveModalFocus(dir: 1 | -1): void {
   const modal = document.querySelector('.modal-backdrop')
@@ -111,13 +140,9 @@ function App(): React.JSX.Element {
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [favorites, setFavorites] = useState<string[]>(() => loadFavorites())
-  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(SOUND_STORAGE_KEY) !== 'false'
-    } catch {
-      return true
-    }
-  })
+  const [prefs, setPrefs] = useState<UiPreferences>(() => loadPrefs())
+  const [user, setUser] = useState<UserProfile | null>(() => loadUser())
+  const soundEnabled = prefs.soundEnabled
 
   const [index, setIndex] = useState(0)
   const [launchError, setLaunchError] = useState('')
@@ -325,10 +350,31 @@ function App(): React.JSX.Element {
     })
   }, [])
 
-  const handleToggleSound = useCallback((enabled: boolean) => {
-    setSoundEnabled(enabled)
+  const handleUpdatePrefs = useCallback((patch: Partial<UiPreferences>) => {
+    setPrefs((prev) => {
+      const next = { ...prev, ...patch }
+      try {
+        localStorage.setItem(PREFS_STORAGE_KEY, JSON.stringify(next))
+      } catch {
+        // Ignore storage errors
+      }
+      return next
+    })
+  }, [])
+
+  const handleSignIn = useCallback((nextUser: UserProfile) => {
+    setUser(nextUser)
     try {
-      localStorage.setItem(SOUND_STORAGE_KEY, String(enabled))
+      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(nextUser))
+    } catch {
+      // Ignore storage errors
+    }
+  }, [])
+
+  const handleSignOut = useCallback(() => {
+    setUser(null)
+    try {
+      localStorage.removeItem(USER_STORAGE_KEY)
     } catch {
       // Ignore storage errors
     }
@@ -648,16 +694,23 @@ function App(): React.JSX.Element {
   const isEmptyLibrary = status !== null && status.ok && allGames.length === 0
   const isEmptyFiltered =
     status !== null && status.ok && allGames.length > 0 && visibleGames.length === 0
-  const ribbonShift = clampedIndex * (metrics.idleTile + metrics.gap)
+  const scaleMultiplier =
+    prefs.tileScale === 'compact' ? 0.86 : prefs.tileScale === 'large' ? 1.15 : 1
+  const scaledActive = Math.round(metrics.activeTile * scaleMultiplier)
+  const scaledIdle = Math.round(metrics.idleTile * scaleMultiplier)
+  const blurPx =
+    prefs.backdropBlur === 'low' ? '24px' : prefs.backdropBlur === 'high' ? '84px' : '56px'
+  const ribbonShift = clampedIndex * (scaledIdle + metrics.gap)
 
   return (
     <div
       className="app"
       style={{
         ['--accent' as string]: accent,
-        ['--tile-active' as string]: `${metrics.activeTile}px`,
-        ['--tile-idle' as string]: `${metrics.idleTile}px`,
-        ['--tile-gap' as string]: `${metrics.gap}px`
+        ['--tile-active' as string]: `${scaledActive}px`,
+        ['--tile-idle' as string]: `${scaledIdle}px`,
+        ['--tile-gap' as string]: `${metrics.gap}px`,
+        ['--cover-blur' as string]: blurPx
       }}
     >
       {/* Full-bleed atmospheric backdrop (prefers wide hero art) */}
@@ -829,6 +882,18 @@ function App(): React.JSX.Element {
             </svg>
           </button>
 
+          <button
+            type="button"
+            className={`profile-pill ${user ? 'signed-in' : ''}`}
+            onClick={() => setActiveModal('profile')}
+            title={
+              user ? `${user.displayName} — Account & Cloud Saves` : 'Sign in / Create account'
+            }
+            aria-label="Player profile"
+          >
+            {user ? user.displayName.slice(0, 2).toUpperCase() : 'Sign in'}
+          </button>
+
           <span className="clock">{clock}</span>
         </div>
       </header>
@@ -954,6 +1019,126 @@ function App(): React.JSX.Element {
               </button>
             </div>
           </div>
+        </main>
+      ) : prefs.layout === 'grid' ? (
+        <main className="grid-stage">
+          <div className="grid-cards">
+            {visibleGames.map((g, i) => {
+              const isActive = i === clampedIndex
+              return (
+                <button
+                  key={g.id}
+                  type="button"
+                  className={`grid-card ${isActive ? 'active' : ''}`}
+                  onClick={() => {
+                    if (isActive) {
+                      void launch()
+                    } else {
+                      playUiSound('move', soundEnabled)
+                      setIndex(i)
+                    }
+                  }}
+                  aria-label={g.name}
+                  aria-pressed={isActive}
+                >
+                  <div
+                    className={`ribbon-tile-inner ${smallIcons[g.id] ? 'is-small-icon' : ''}`}
+                    style={{ ['--tile-accent' as string]: g.color ?? '#2f6bff' }}
+                  >
+                    {g.cover ? (
+                      <img
+                        src={g.cover}
+                        alt={g.name}
+                        draggable={false}
+                        onLoad={(e) => {
+                          const img = e.currentTarget
+                          const isSmall =
+                            img.naturalWidth > 0 &&
+                            img.naturalWidth <= 96 &&
+                            img.naturalHeight <= 96
+                          setSmallIcons((prev) =>
+                            prev[g.id] === isSmall ? prev : { ...prev, [g.id]: isSmall }
+                          )
+                        }}
+                      />
+                    ) : (
+                      <div
+                        className="tile-fallback"
+                        style={{ ['--tile-accent' as string]: g.color ?? '#2f6bff' }}
+                      >
+                        <svg
+                          width="34"
+                          height="34"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          aria-hidden="true"
+                          className="tile-fallback-icon"
+                        >
+                          <path
+                            d="M6.5 8.5h11a3.5 3.5 0 0 1 3.4 4.3l-.9 3.8a2.3 2.3 0 0 1-4.1.8l-1.5-2h-4.8l-1.5 2a2.3 2.3 0 0 1-4.1-.8l-.9-3.8A3.5 3.5 0 0 1 6.5 8.5Z"
+                            stroke="currentColor"
+                            strokeWidth="1.6"
+                          />
+                          <path
+                            d="M8 11.5v3M6.5 13h3M15.5 12h.01M17.5 13.5h.01"
+                            stroke="currentColor"
+                            strokeWidth="1.6"
+                            strokeLinecap="round"
+                          />
+                        </svg>
+                      </div>
+                    )}
+                  </div>
+                  <span className="grid-card-title">{g.name}</span>
+                </button>
+              )
+            })}
+          </div>
+
+          <section className="grid-footer-bar">
+            <div className="grid-footer-info">
+              {gamePlayRecord?.sessionStart && (
+                <span className="running-pill">
+                  <span className="running-dot" />
+                  Running
+                </span>
+              )}
+              <h1 className="grid-hero-title">{game?.name}</h1>
+              {launchError ? (
+                <div className="error-banner" role="alert">
+                  <span>{launchError}</span>
+                </div>
+              ) : (
+                <p className="hero-subtitle">
+                  {gamePlayRecord
+                    ? `${formatDuration(gamePlayRecord.totalMs)} played · Last played ${formatLastPlayed(gamePlayRecord.lastPlayed)}`
+                    : 'Press Enter or A to start'}
+                </p>
+              )}
+            </div>
+            <div className="hero-actions">
+              <button
+                type="button"
+                className="play-pill"
+                onClick={() => void launch()}
+                disabled={launching}
+              >
+                {launching ? 'Starting...' : 'Play'}
+              </button>
+              <button
+                type="button"
+                className="more-circle"
+                onClick={() => {
+                  setConfirmRemove(false)
+                  setActiveModal('game-options')
+                }}
+                title="Game options (Y)"
+                aria-label="Game options"
+              >
+                •••
+              </button>
+            </div>
+          </section>
         </main>
       ) : (
         <main className="ps5-stage">
@@ -1111,29 +1296,31 @@ function App(): React.JSX.Element {
       )}
 
       {/* Subtle Bottom Controls Legend */}
-      <footer className="legend">
-        <span>
-          <kbd>←</kbd> <kbd>→</kbd> / D-pad Move
-        </span>
-        <span>
-          <kbd>Enter</kbd> / <kbd>A</kbd> Play
-        </span>
-        <span>
-          <kbd>Y</kbd> Options
-        </span>
-        <span>
-          <kbd>F</kbd> Favourite
-        </span>
-        <span>
-          <kbd>/</kbd> Search
-        </span>
-        <span>
-          <kbd>Q</kbd> / <kbd>E</kbd> · LB / RB Tabs
-        </span>
-        <span>
-          <kbd>F11</kbd> Fullscreen
-        </span>
-      </footer>
+      {prefs.showLegend && (
+        <footer className="legend">
+          <span>
+            <kbd>←</kbd> <kbd>→</kbd> / D-pad Move
+          </span>
+          <span>
+            <kbd>Enter</kbd> / <kbd>A</kbd> Play
+          </span>
+          <span>
+            <kbd>Y</kbd> Options
+          </span>
+          <span>
+            <kbd>F</kbd> Favourite
+          </span>
+          <span>
+            <kbd>/</kbd> Search
+          </span>
+          <span>
+            <kbd>Q</kbd> / <kbd>E</kbd> · LB / RB Tabs
+          </span>
+          <span>
+            <kbd>F11</kbd> Fullscreen
+          </span>
+        </footer>
+      )}
 
       {/* Game Options Modal (Y / •••) */}
       {activeModal === 'game-options' && game && (
@@ -1235,10 +1422,22 @@ function App(): React.JSX.Element {
       {activeModal === 'settings' && (
         <SettingsModal
           warnings={warnings}
-          soundEnabled={soundEnabled}
-          onToggleSound={handleToggleSound}
+          prefs={prefs}
+          user={user}
+          onUpdatePrefs={handleUpdatePrefs}
+          onOpenProfile={() => setActiveModal('profile')}
           onOpenGamesFile={openGamesFile}
           onReloadLibrary={loadLibrary}
+          onClose={closeModal}
+        />
+      )}
+
+      {/* Profile / Sign-in / Sign-up Modal */}
+      {activeModal === 'profile' && (
+        <ProfileModal
+          user={user}
+          onSignIn={handleSignIn}
+          onSignOut={handleSignOut}
           onClose={closeModal}
         />
       )}
