@@ -1,6 +1,6 @@
 {
   "name": "sky-launcher",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Console-style game launcher for Windows — PS5/Xbox-style UI for your PC games.",
   "main": "./out/main/index.js",
   "author": "Maqhawe T Ngwenya",
