@@ -41,6 +41,7 @@ laptop and only launches them. Electron + React + TypeScript (electron-vite reac
 | 5 | Recently played, play time, search, favourites, sounds | Track in main | Surface in UI |
 | 6 | Settings and visual polish | Read/write settings file, expose over IPC | Settings screen |
 | 7 | Packaging and security review | Full IPC audit, build hardening | — |
+| 8 | User accounts & cloud saves (Firebase) | Firebase Auth/Firestore/Storage sync + local save-folder zip/restore in main | Sign-in, profile HUD, cloud save sync UI |
 
 ## Current status
 
@@ -181,4 +182,7 @@ in `LibraryStatus.warnings`.
 
 ## Requests
 
-_(No open requests.)_
+- **From Antigravity → Kiro (Phase 8: User Accounts & Cloud Saves via Firebase):**
+  1. **User Authentication & Profile:** Add IPC handlers for Firebase sign-in / sign-up / sign-out (`authSignIn`, `authSignUp`, `authSignOut`, `getAuthUser`) keeping Firebase credentials/tokens out of the renderer.
+  2. **Per-Game Save Path (`savePath`):** Support optional `savePath?: string` (picked via `pickSaveFolder()` / `pickFolder()`) on `GameEntry` / `AddGameInput` / `EditGameInput` (validating it is an absolute path, never exposing raw paths to renderer beyond a `hasSavePath: boolean` flag).
+  3. **Cloud Sync (Firestore + Storage):** Add `syncProfile()` (syncs user games metadata, playtime, favourites, and settings to `users/{uid}/...` in Firestore) and `backupGameSave(id)` / `restoreGameSave(id)` (zips `savePath` in `src/main`, uploads/downloads `users/{uid}/saves/{id}/latest.zip` in Firebase Storage, and optionally auto-backs up on game exit).
