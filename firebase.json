@@ -1,0 +1,15 @@
+{
+  "auth": {
+    "authorizedDomains": ["localhost"],
+    "providers": {
+      "emailPassword": true,
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "Sky Launcher",
+        "supportEmail": "thabisomaqhawengwenya@gmail.com"
+      }
+    }
+  },
+  "firestore": {
+    "rules": "firestore.rules"
+  }
+}
