@@ -14,6 +14,15 @@ const SOURCE_LABELS: Record<ScanCandidate['source'], string> = {
   folder: 'Folder'
 }
 
+const NON_GAME_PATTERN =
+  /vcredist|dxwebsetup|directx|dotnet|oalinst|redist|gdfinstall|gdftool|firewall|updater|unins|setup|install|crash|reporter|qtwebengine|pbsvc|uplaybrowser|yuzu-cmd|trainer|editor|config/i
+
+function isGameShortcut(item: ScanCandidate): boolean {
+  if (item.source !== 'folder') return true
+  const target = `${item.name} ${item.exe ?? ''}`
+  return !NON_GAME_PATTERN.test(target)
+}
+
 export function ScanModal({
   existingNames,
   onClose,
@@ -31,19 +40,20 @@ export function ScanModal({
   const existingSet = new Set(existingNames.map((n) => n.trim().toLowerCase()))
 
   const applyResults = (items: ScanCandidate[], label: string): void => {
-    setCandidates(items)
+    const filtered = items.filter(isGameShortcut)
+    setCandidates(filtered)
     const nextSelected = new Set<number>()
-    items.forEach((item, idx) => {
+    filtered.forEach((item, idx) => {
       if (!existingSet.has(item.name.trim().toLowerCase())) {
         nextSelected.add(idx)
       }
     })
     setSelected(nextSelected)
-    if (items.length === 0) {
-      setStatusMessage(`No games found from ${label}.`)
+    if (filtered.length === 0) {
+      setStatusMessage(`No game shortcuts found from ${label}.`)
     } else {
       setStatusMessage(
-        `Found ${items.length} ${items.length === 1 ? 'game' : 'games'} from ${label}. Choose which ones to add.`
+        `Found ${filtered.length} ${filtered.length === 1 ? 'game' : 'games'} from ${label}. Choose which ones to add.`
       )
     }
   }
