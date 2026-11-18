@@ -79,15 +79,8 @@ export type Settings = {
   minimizeOnLaunch?: boolean
   gamesJsonPath?: string
   autoBackupSaves?: boolean
-  /**
-   * Firebase project configuration. Required for auth and cloud sync.
-   * Never exposes the idToken or refreshToken to the renderer.
-   */
-  firebase?: {
-    apiKey: string
-    projectId: string
-    storageBucket: string
-  }
+  /** Firebase project configuration. Required for cloud sync and save backup. */
+  firebase?: FirebaseConfig
 }
 
 export type PlayRecord = {
@@ -122,6 +115,13 @@ export type ArtProgressEvent = {
 export type AuthUser = {
   uid: string
   email: string
+}
+
+export type FirebaseConfig = {
+  apiKey: string
+  authDomain: string
+  projectId: string
+  storageBucket: string
 }
 
 // ---------------------------------------------------------------------------
@@ -189,42 +189,27 @@ declare global {
       importLibraryConfirm(filePath: string): Promise<LaunchResult>
 
       // ── Firebase Auth ────────────────────────────────────────────────────
-      /**
-       * Sign in with email and password.
-       * Credentials are sent to Firebase Identity Toolkit in main only.
-       * The idToken and refreshToken are stored in settings.json, never returned here.
-       */
-      authSignIn(
-        email: string,
-        password: string
-      ): Promise<{ ok: boolean; user?: AuthUser; error?: string }>
-      /** Create a new account with email and password. */
-      authSignUp(
-        email: string,
-        password: string
-      ): Promise<{ ok: boolean; user?: AuthUser; error?: string }>
-      /** Sign out and clear stored auth tokens. */
-      authSignOut(): Promise<LaunchResult>
-      /** Returns the currently signed-in user, or null. */
-      getAuthUser(): Promise<AuthUser | null>
+      // Auth runs in the renderer via the Firebase JS SDK (@lib/firebase).
+      // The renderer calls signInWithEmailAndPassword / signInWithPopup (Google)
+      // directly, then passes the resulting idToken to the cloud methods below.
 
       // ── Cloud sync ───────────────────────────────────────────────────────
       /**
        * Sync games metadata, playtime, and settings to Firestore.
-       * Requires sign-in and Firebase config in settings.
+       * Requires the user's idToken and uid from the Firebase SDK in the renderer.
        * Never syncs exe paths, save paths, or the SteamGridDB API key.
        */
-      syncProfile(): Promise<LaunchResult>
+      syncProfile(idToken: string, uid: string): Promise<LaunchResult>
       /**
        * Zip the game's save folder and upload it to Firebase Storage.
-       * The game must have a savePath set.
+       * The game must have a savePath set. Requires the user's idToken.
        */
-      backupGameSave(id: string): Promise<LaunchResult>
+      backupGameSave(id: string, idToken: string): Promise<LaunchResult>
       /**
        * Download the latest save backup from Firebase Storage and
-       * extract it over the game's save folder.
+       * extract it over the game's save folder. Requires the user's idToken.
        */
-      restoreGameSave(id: string): Promise<LaunchResult>
+      restoreGameSave(id: string, idToken: string): Promise<LaunchResult>
 
       // ── Push event subscriptions ─────────────────────────────────────────
       onLibraryChanged(cb: () => void): () => void

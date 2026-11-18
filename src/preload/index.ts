@@ -51,18 +51,17 @@ const api = {
   importLibrary: () => ipcRenderer.invoke('games:import'),
   importLibraryConfirm: (filePath: string) => ipcRenderer.invoke('games:import-confirm', filePath),
 
-  // ── Firebase Auth ─────────────────────────────────────────────────────────
-  authSignIn: (email: string, password: string) =>
-    ipcRenderer.invoke('auth:sign-in', { email, password }),
-  authSignUp: (email: string, password: string) =>
-    ipcRenderer.invoke('auth:sign-up', { email, password }),
-  authSignOut: () => ipcRenderer.invoke('auth:sign-out'),
-  getAuthUser: () => ipcRenderer.invoke('auth:get-user'),
+  // ── Firebase Auth (renderer-side via SDK) ──────────────────────────────
+  // authSignIn / authSignUp / authSignOut / getAuthUser are handled in the
+  // renderer using the Firebase JS SDK directly — no IPC needed.
 
   // ── Cloud sync ────────────────────────────────────────────────────────────
-  syncProfile: () => ipcRenderer.invoke('cloud:sync-profile'),
-  backupGameSave: (id: string) => ipcRenderer.invoke('save:backup', id),
-  restoreGameSave: (id: string) => ipcRenderer.invoke('save:restore', id),
+  syncProfile: (idToken: string, uid: string) =>
+    ipcRenderer.invoke('cloud:sync-profile', { idToken, uid }),
+  backupGameSave: (id: string, idToken: string) =>
+    ipcRenderer.invoke('save:backup', id, { idToken }),
+  restoreGameSave: (id: string, idToken: string) =>
+    ipcRenderer.invoke('save:restore', id, { idToken }),
 
   // ── Push event subscriptions ─────────────────────────────────────────────
   onLibraryChanged: (cb: () => void) => {

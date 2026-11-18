@@ -97,14 +97,7 @@ type FirebaseConfig = {
   apiKey: string
   projectId: string
   storageBucket: string
-}
-
-type AuthState = {
-  idToken: string
-  refreshToken: string
-  uid: string
-  email: string
-  expiresAt: number // ms epoch
+  authDomain: string
 }
 
 type Settings = {
@@ -112,8 +105,8 @@ type Settings = {
   minimizeOnLaunch?: boolean
   gamesJsonPath?: string
   autoBackupSaves?: boolean
+  /** Firebase project config — stored here so main can use it for Storage REST calls. */
   firebase?: FirebaseConfig
-  auth?: AuthState
 }
 
 type ArtProgressEvent = {
@@ -122,11 +115,6 @@ type ArtProgressEvent = {
   done: number
   total: number
   ok: boolean
-}
-
-type AuthUser = {
-  uid: string
-  email: string
 }
 
 // ---------------------------------------------------------------------------
@@ -237,25 +225,8 @@ function loadSettings(): Settings {
         out.firebase = {
           apiKey: fb.apiKey,
           projectId: fb.projectId,
-          storageBucket: fb.storageBucket
-        }
-      }
-    }
-    if (typeof s.auth === 'object' && s.auth !== null) {
-      const a = s.auth as Record<string, unknown>
-      if (
-        typeof a.idToken === 'string' &&
-        typeof a.refreshToken === 'string' &&
-        typeof a.uid === 'string' &&
-        typeof a.email === 'string' &&
-        typeof a.expiresAt === 'number'
-      ) {
-        out.auth = {
-          idToken: a.idToken,
-          refreshToken: a.refreshToken,
-          uid: a.uid,
-          email: a.email,
-          expiresAt: a.expiresAt
+          storageBucket: fb.storageBucket,
+          authDomain: typeof fb.authDomain === 'string' ? fb.authDomain : ''
         }
       }
     }
@@ -735,72 +706,6 @@ async function downloadAndCache(url: string, destPath: string): Promise<string |
 }
 
 // ---------------------------------------------------------------------------
-// Firebase Auth (REST — no npm dependency)
-// ---------------------------------------------------------------------------
-
-const FB_AUTH_BASE = 'https://identitytoolkit.googleapis.com/v1'
-const FB_TOKEN_BASE = 'https://securetoken.googleapis.com/v1'
-
-async function firebaseRequest(
-  url: string,
-  body: Record<string, unknown>
-): Promise<{ status: number; data: unknown }> {
-  const payload = JSON.stringify(body)
-  const { status, body: resBuf } = await netFetchBinary(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: payload
-  })
-  let data: unknown
-  try {
-    data = JSON.parse(resBuf.toString('utf-8'))
-  } catch {
-    data = {}
-  }
-  return { status, data }
-}
-
-/** Refresh the idToken using the stored refreshToken. Updates settings.json. */
-async function refreshIdToken(settings: Settings): Promise<Settings | null> {
-  if (!settings.firebase?.apiKey || !settings.auth?.refreshToken) return null
-  try {
-    const { status, data } = await firebaseRequest(
-      `${FB_TOKEN_BASE}/token?key=${settings.firebase.apiKey}`,
-      { grant_type: 'refresh_token', refresh_token: settings.auth.refreshToken }
-    )
-    if (status !== 200) return null
-    const d = data as Record<string, unknown>
-    if (typeof d.id_token !== 'string') return null
-
-    const expiresIn = typeof d.expires_in === 'string' ? parseInt(d.expires_in, 10) : 3600
-    const newAuth: AuthState = {
-      ...settings.auth,
-      idToken: d.id_token,
-      refreshToken:
-        typeof d.refresh_token === 'string' ? d.refresh_token : settings.auth.refreshToken,
-      expiresAt: Date.now() + expiresIn * 1000 - 60_000 // 1 min safety margin
-    }
-    saveSettings({ auth: newAuth })
-    return { ...settings, auth: newAuth }
-  } catch {
-    return null
-  }
-}
-
-/** Returns a valid idToken, refreshing if needed. Returns null if not signed in. */
-async function getValidToken(): Promise<string | null> {
-  let settings = loadSettings()
-  if (!settings.auth) return null
-
-  if (Date.now() < settings.auth.expiresAt) return settings.auth.idToken
-
-  const refreshed = await refreshIdToken(settings)
-  if (!refreshed?.auth) return null
-  settings = refreshed
-  return settings.auth!.idToken
-}
-
-// ---------------------------------------------------------------------------
 // Firestore REST helpers
 // ---------------------------------------------------------------------------
 
@@ -902,6 +807,31 @@ async function unzipToFolder(
   const src = zipPath.replace(/'/g, "''")
   const dst = destFolder.replace(/'/g, "''")
   return psExec(`Expand-Archive -Path '${src}' -DestinationPath '${dst}' -Force`)
+}
+
+/** Upload a local zip file to Firebase Storage. idToken comes from the renderer. */
+async function uploadSaveZip(
+  gameId: string,
+  zipPath: string,
+  idToken: string,
+  firebase: FirebaseConfig
+): Promise<boolean> {
+  if (!existsSync(zipPath)) return false
+  try {
+    const zipData = readFileSync(zipPath)
+    const storageName = encodeURIComponent(
+      `saves/${firebase.storageBucket.split('.')[0]}/${gameId}/latest.zip`
+    )
+    const uploadUrl = `https://firebasestorage.googleapis.com/v0/b/${firebase.storageBucket}/o?uploadType=media&name=${storageName}`
+    const { status } = await netFetchBinary(uploadUrl, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/zip' },
+      body: zipData.toString('binary')
+    })
+    return status >= 200 && status < 300
+  } catch {
+    return false
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1357,20 +1287,6 @@ app.whenReady().then(() => {
             recordSessionEnd(id)
             hidePillWindow()
             BrowserWindow.getAllWindows()[0]?.webContents.send('playtime:updated', id)
-
-            // Auto-backup save on exit if configured
-            const s = loadSettings()
-            if (s.autoBackupSaves && game.savePath && existsSync(game.savePath)) {
-              void (async () => {
-                const token = await getValidToken()
-                if (!token || !s.firebase) return
-                const zipPath = join(savesDir(), `${game.id}-autosave.zip`)
-                const zipped = await zipFolder(game.savePath!, zipPath)
-                if (zipped.ok) {
-                  await uploadSaveZip(game.id, zipPath, token, s.firebase)
-                }
-              })()
-            }
           })
           void earlyExitPromise.then((crashed) => {
             if (crashed) {
@@ -1557,10 +1473,8 @@ app.whenReady().then(() => {
 
   // ── Settings ──────────────────────────────────────────────────────────────
 
-  ipcMain.handle('settings:get', (): Omit<Settings, 'auth'> => {
-    const { auth: _, ...rest } = loadSettings()
-    void _
-    return rest
+  ipcMain.handle('settings:get', (): Settings => {
+    return loadSettings()
   })
 
   ipcMain.handle('settings:set', (_e, patch: unknown): LaunchResult => {
@@ -1583,7 +1497,8 @@ app.whenReady().then(() => {
           safe.firebase = {
             apiKey: fb.apiKey,
             projectId: fb.projectId,
-            storageBucket: fb.storageBucket
+            storageBucket: fb.storageBucket,
+            authDomain: typeof fb.authDomain === 'string' ? fb.authDomain : ''
           }
         }
       }
@@ -1804,158 +1719,27 @@ app.whenReady().then(() => {
   })
 
   // ── Firebase Auth ─────────────────────────────────────────────────────────
-
-  ipcMain.handle(
-    'auth:sign-in',
-    async (_e, payload: unknown): Promise<{ ok: boolean; user?: AuthUser; error?: string }> => {
-      if (typeof payload !== 'object' || payload === null)
-        return { ok: false, error: 'Invalid payload.' }
-      const p = payload as Record<string, unknown>
-      if (typeof p.email !== 'string' || typeof p.password !== 'string')
-        return { ok: false, error: 'Email and password are required.' }
-
-      const settings = loadSettings()
-      if (!settings.firebase?.apiKey)
-        return {
-          ok: false,
-          error: 'Firebase is not configured. Add your Firebase config in Settings.'
-        }
-
-      try {
-        const { status, data } = await firebaseRequest(
-          `${FB_AUTH_BASE}/accounts:signInWithPassword?key=${settings.firebase.apiKey}`,
-          { email: p.email, password: p.password, returnSecureToken: true }
-        )
-        if (status !== 200) {
-          const d = data as Record<string, unknown>
-          const msg = (d?.error as Record<string, unknown>)?.message
-          return {
-            ok: false,
-            error:
-              typeof msg === 'string' ? msg.replace(/_/g, ' ').toLowerCase() : 'Sign-in failed.'
-          }
-        }
-        const d = data as Record<string, unknown>
-        if (
-          typeof d.idToken !== 'string' ||
-          typeof d.refreshToken !== 'string' ||
-          typeof d.localId !== 'string'
-        )
-          return { ok: false, error: 'Unexpected response from Firebase.' }
-
-        const expiresIn = typeof d.expiresIn === 'string' ? parseInt(d.expiresIn, 10) : 3600
-        const auth: AuthState = {
-          idToken: d.idToken,
-          refreshToken: d.refreshToken,
-          uid: d.localId,
-          email: p.email,
-          expiresAt: Date.now() + expiresIn * 1000 - 60_000
-        }
-        saveSettings({ auth })
-        return { ok: true, user: { uid: auth.uid, email: auth.email } }
-      } catch (err) {
-        return {
-          ok: false,
-          error: `Sign-in failed: ${err instanceof Error ? err.message : String(err)}`
-        }
-      }
-    }
-  )
-
-  ipcMain.handle(
-    'auth:sign-up',
-    async (_e, payload: unknown): Promise<{ ok: boolean; user?: AuthUser; error?: string }> => {
-      if (typeof payload !== 'object' || payload === null)
-        return { ok: false, error: 'Invalid payload.' }
-      const p = payload as Record<string, unknown>
-      if (typeof p.email !== 'string' || typeof p.password !== 'string')
-        return { ok: false, error: 'Email and password are required.' }
-
-      const settings = loadSettings()
-      if (!settings.firebase?.apiKey)
-        return {
-          ok: false,
-          error: 'Firebase is not configured. Add your Firebase config in Settings.'
-        }
-
-      try {
-        const { status, data } = await firebaseRequest(
-          `${FB_AUTH_BASE}/accounts:signUp?key=${settings.firebase.apiKey}`,
-          { email: p.email, password: p.password, returnSecureToken: true }
-        )
-        if (status !== 200) {
-          const d = data as Record<string, unknown>
-          const msg = (d?.error as Record<string, unknown>)?.message
-          return {
-            ok: false,
-            error:
-              typeof msg === 'string' ? msg.replace(/_/g, ' ').toLowerCase() : 'Sign-up failed.'
-          }
-        }
-        const d = data as Record<string, unknown>
-        if (
-          typeof d.idToken !== 'string' ||
-          typeof d.refreshToken !== 'string' ||
-          typeof d.localId !== 'string'
-        )
-          return { ok: false, error: 'Unexpected response from Firebase.' }
-
-        const expiresIn = typeof d.expiresIn === 'string' ? parseInt(d.expiresIn, 10) : 3600
-        const auth: AuthState = {
-          idToken: d.idToken,
-          refreshToken: d.refreshToken,
-          uid: d.localId,
-          email: p.email,
-          expiresAt: Date.now() + expiresIn * 1000 - 60_000
-        }
-        saveSettings({ auth })
-        return { ok: true, user: { uid: auth.uid, email: auth.email } }
-      } catch (err) {
-        return {
-          ok: false,
-          error: `Sign-up failed: ${err instanceof Error ? err.message : String(err)}`
-        }
-      }
-    }
-  )
-
-  ipcMain.handle('auth:sign-out', (): LaunchResult => {
-    try {
-      const current = loadSettings()
-      // Remove auth state without touching other settings
-      const { auth: _, ...rest } = current
-      void _
-      writeFileSync(settingsFile(), JSON.stringify(rest, null, 2), 'utf-8')
-      return { ok: true }
-    } catch (err) {
-      return {
-        ok: false,
-        error: `Sign-out failed: ${err instanceof Error ? err.message : String(err)}`
-      }
-    }
-  })
-
-  ipcMain.handle('auth:get-user', (): AuthUser | null => {
-    const { auth } = loadSettings()
-    if (!auth) return null
-    return { uid: auth.uid, email: auth.email }
-  })
+  // Auth runs in the renderer via Firebase JS SDK (src/lib/firebase.ts).
+  // The renderer calls authSignIn/authSignUp/authSignOut/getAuthUser directly
+  // using the SDK, then passes the idToken here for cloud operations.
 
   // ── Cloud sync (Firestore) ─────────────────────────────────────────────────
 
-  ipcMain.handle('cloud:sync-profile', async (): Promise<LaunchResult> => {
-    const token = await getValidToken()
-    if (!token) return { ok: false, error: 'Not signed in.' }
+  ipcMain.handle('cloud:sync-profile', async (_e, payload: unknown): Promise<LaunchResult> => {
+    if (typeof payload !== 'object' || payload === null)
+      return { ok: false, error: 'Invalid payload.' }
+    const p = payload as Record<string, unknown>
+    if (typeof p.idToken !== 'string' || !p.idToken)
+      return { ok: false, error: 'No auth token provided. Sign in first.' }
+    if (typeof p.uid !== 'string' || !p.uid) return { ok: false, error: 'No uid provided.' }
 
     const settings = loadSettings()
     if (!settings.firebase?.projectId)
       return { ok: false, error: 'Firebase project not configured.' }
 
-    const { uid } = settings.auth!
     const { games } = loadGames()
     const playtime = loadPlaytime()
 
-    // Build a Firestore-safe profile document
     const profile: Record<string, unknown> = {
       updatedAt: new Date().toISOString(),
       gameCount: games.length,
@@ -1967,7 +1751,6 @@ app.whenReady().then(() => {
       })
     }
 
-    // Sync games metadata (names, colors, tags, notes — no paths)
     const gamesData: Record<string, unknown> = {}
     for (const g of games) {
       gamesData[g.id] = {
@@ -1982,9 +1765,9 @@ app.whenReady().then(() => {
 
     const ok = await firestoreWrite(
       settings.firebase.projectId,
-      `users/${uid}/profile/data`,
+      `users/${p.uid}/profile/data`,
       profile,
-      token
+      p.idToken
     )
     return ok
       ? { ok: true }
@@ -1993,107 +1776,90 @@ app.whenReady().then(() => {
 
   // ── Save backup / restore ─────────────────────────────────────────────────
 
-  async function uploadSaveZip(
-    gameId: string,
-    zipPath: string,
-    token: string,
-    firebase: FirebaseConfig
-  ): Promise<boolean> {
-    if (!existsSync(zipPath)) return false
-    try {
-      const zipData = readFileSync(zipPath)
-      const encodedPath = encodeURIComponent(
-        `saves/${firebase.storageBucket.split('.')[0]}/${gameId}/latest.zip`
-      )
-      const uploadUrl = `https://firebasestorage.googleapis.com/v0/b/${firebase.storageBucket}/o?uploadType=media&name=${encodedPath}`
-      const { status } = await netFetchBinary(uploadUrl, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/zip'
-        },
-        body: zipData.toString('binary')
-      })
-      return status >= 200 && status < 300
-    } catch {
-      return false
-    }
-  }
+  ipcMain.handle(
+    'save:backup',
+    async (_e, id: unknown, payload: unknown): Promise<LaunchResult> => {
+      if (typeof id !== 'string' || !id.trim()) return { ok: false, error: 'Invalid game id.' }
+      if (typeof payload !== 'object' || payload === null)
+        return { ok: false, error: 'Invalid payload.' }
+      const p = payload as Record<string, unknown>
+      if (typeof p.idToken !== 'string' || !p.idToken)
+        return { ok: false, error: 'No auth token. Sign in first.' }
 
-  ipcMain.handle('save:backup', async (_e, id: unknown): Promise<LaunchResult> => {
-    if (typeof id !== 'string' || !id.trim()) return { ok: false, error: 'Invalid game id.' }
+      const settings = loadSettings()
+      if (!settings.firebase) return { ok: false, error: 'Firebase is not configured.' }
 
-    const token = await getValidToken()
-    if (!token) return { ok: false, error: 'Not signed in. Sign in to back up saves to the cloud.' }
-
-    const settings = loadSettings()
-    if (!settings.firebase) return { ok: false, error: 'Firebase is not configured.' }
-
-    const { games } = loadGames()
-    const game = games.find((g) => g.id === id)
-    if (!game) return { ok: false, error: `Game "${id}" not found.` }
-    if (!game.savePath)
-      return {
-        ok: false,
-        error: `"${game.name}" has no save folder set. Edit the game to add one.`
-      }
-    if (!existsSync(game.savePath))
-      return {
-        ok: false,
-        error: `Save folder not found: "${game.savePath}". Check the path is correct.`
-      }
-
-    const zipPath = join(savesDir(), `${game.id}-backup.zip`)
-    const zipped = await zipFolder(game.savePath, zipPath)
-    if (!zipped.ok) return { ok: false, error: `Could not zip save folder: ${zipped.error}` }
-
-    const uploaded = await uploadSaveZip(game.id, zipPath, token, settings.firebase)
-    return uploaded
-      ? { ok: true }
-      : {
+      const { games } = loadGames()
+      const game = games.find((g) => g.id === id)
+      if (!game) return { ok: false, error: `Game "${id}" not found.` }
+      if (!game.savePath)
+        return {
           ok: false,
-          error: 'Upload to Firebase Storage failed. Check your connection and Firebase config.'
+          error: `"${game.name}" has no save folder set. Edit the game to add one.`
         }
-  })
+      if (!existsSync(game.savePath))
+        return {
+          ok: false,
+          error: `Save folder not found: "${game.savePath}". Check the path is correct.`
+        }
 
-  ipcMain.handle('save:restore', async (_e, id: unknown): Promise<LaunchResult> => {
-    if (typeof id !== 'string' || !id.trim()) return { ok: false, error: 'Invalid game id.' }
+      const zipPath = join(savesDir(), `${game.id}-backup.zip`)
+      const zipped = await zipFolder(game.savePath, zipPath)
+      if (!zipped.ok) return { ok: false, error: `Could not zip save folder: ${zipped.error}` }
 
-    const token = await getValidToken()
-    if (!token) return { ok: false, error: 'Not signed in.' }
-
-    const settings = loadSettings()
-    if (!settings.firebase) return { ok: false, error: 'Firebase is not configured.' }
-
-    const { games } = loadGames()
-    const game = games.find((g) => g.id === id)
-    if (!game) return { ok: false, error: `Game "${id}" not found.` }
-    if (!game.savePath) return { ok: false, error: `"${game.name}" has no save folder set.` }
-
-    try {
-      const encodedPath = encodeURIComponent(
-        `saves/${settings.firebase.storageBucket.split('.')[0]}/${game.id}/latest.zip`
-      )
-      const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${settings.firebase.storageBucket}/o/${encodedPath}?alt=media`
-      const { status, body } = await netFetchBinary(downloadUrl, {
-        headers: { Authorization: `Bearer ${token}` }
-      })
-      if (status !== 200) return { ok: false, error: `No cloud backup found for "${game.name}".` }
-
-      const zipPath = join(savesDir(), `${game.id}-restore.zip`)
-      writeFileSync(zipPath, body)
-
-      const extracted = await unzipToFolder(zipPath, game.savePath)
-      return extracted.ok
+      const uploaded = await uploadSaveZip(game.id, zipPath, p.idToken, settings.firebase)
+      return uploaded
         ? { ok: true }
-        : { ok: false, error: `Could not extract save files: ${extracted.error}` }
-    } catch (err) {
-      return {
-        ok: false,
-        error: `Restore failed: ${err instanceof Error ? err.message : String(err)}`
+        : {
+            ok: false,
+            error: 'Upload to Firebase Storage failed. Check your connection and Firebase config.'
+          }
+    }
+  )
+
+  ipcMain.handle(
+    'save:restore',
+    async (_e, id: unknown, payload: unknown): Promise<LaunchResult> => {
+      if (typeof id !== 'string' || !id.trim()) return { ok: false, error: 'Invalid game id.' }
+      if (typeof payload !== 'object' || payload === null)
+        return { ok: false, error: 'Invalid payload.' }
+      const p = payload as Record<string, unknown>
+      if (typeof p.idToken !== 'string' || !p.idToken)
+        return { ok: false, error: 'No auth token. Sign in first.' }
+
+      const settings = loadSettings()
+      if (!settings.firebase) return { ok: false, error: 'Firebase is not configured.' }
+
+      const { games } = loadGames()
+      const game = games.find((g) => g.id === id)
+      if (!game) return { ok: false, error: `Game "${id}" not found.` }
+      if (!game.savePath) return { ok: false, error: `"${game.name}" has no save folder set.` }
+
+      try {
+        const encodedPath = encodeURIComponent(
+          `saves/${settings.firebase.storageBucket.split('.')[0]}/${game.id}/latest.zip`
+        )
+        const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${settings.firebase.storageBucket}/o/${encodedPath}?alt=media`
+        const { status, body } = await netFetchBinary(downloadUrl, {
+          headers: { Authorization: `Bearer ${p.idToken}` }
+        })
+        if (status !== 200) return { ok: false, error: `No cloud backup found for "${game.name}".` }
+
+        const zipPath = join(savesDir(), `${game.id}-restore.zip`)
+        writeFileSync(zipPath, body)
+
+        const extracted = await unzipToFolder(zipPath, game.savePath)
+        return extracted.ok
+          ? { ok: true }
+          : { ok: false, error: `Could not extract save files: ${extracted.error}` }
+      } catch (err) {
+        return {
+          ok: false,
+          error: `Restore failed: ${err instanceof Error ? err.message : String(err)}`
+        }
       }
     }
-  })
+  )
 
   createWindow()
   app.on('activate', () => {
