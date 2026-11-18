@@ -23,6 +23,9 @@ export function ProfileModal({
   const [displayName, setDisplayName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
@@ -41,6 +44,10 @@ export function ProfileModal({
     }
     if (mode === 'signup' && !trimmedName) {
       setError('Enter a display name for your profile.')
+      return
+    }
+    if (mode === 'signup' && password !== confirmPassword) {
+      setError('Passwords do not match.')
       return
     }
 
@@ -168,16 +175,47 @@ export function ProfileModal({
                 />
               </label>
 
-              <label className="sheet-row">
-                <span className="sheet-label">Password</span>
+              <div className="sheet-row">
+                <div className="sheet-row-head">
+                  <span className="sheet-label">Password</span>
+                  <button
+                    type="button"
+                    className="inline-link"
+                    onClick={() => setShowPassword((prev) => !prev)}
+                  >
+                    {showPassword ? 'Hide' : 'Show'}
+                  </button>
+                </div>
                 <input
-                  type="password"
+                  type={showPassword ? 'text' : 'password'}
                   className="sheet-input"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="Minimum 6 characters"
                 />
-              </label>
+              </div>
+
+              {mode === 'signup' && (
+                <div className="sheet-row">
+                  <div className="sheet-row-head">
+                    <span className="sheet-label">Confirm password</span>
+                    <button
+                      type="button"
+                      className="inline-link"
+                      onClick={() => setShowConfirmPassword((prev) => !prev)}
+                    >
+                      {showConfirmPassword ? 'Hide' : 'Show'}
+                    </button>
+                  </div>
+                  <input
+                    type={showConfirmPassword ? 'text' : 'password'}
+                    className="sheet-input"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Re-enter your password"
+                  />
+                </div>
+              )}
 
               {error && (
                 <div className="error-banner" role="alert">
