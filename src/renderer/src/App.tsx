@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { onAuthStateChanged } from 'firebase/auth'
+import { auth } from '@lib/firebase'
 import type { AuthUser, GameEntry, LibraryStatus, PlaytimeMap } from '../../preload/index.d'
 import { GameFormModal } from './components/GameFormModal'
 import { ProfileModal } from './components/ProfileModal'
@@ -259,14 +261,20 @@ function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (fbUser) => {
+      setUser(fbUser ? { uid: fbUser.uid, email: fbUser.email ?? '' } : null)
+    })
+    return () => unsub()
+  }, [])
+
+  useEffect(() => {
     let active = true
     const fetchInitial = window.api
       ? Promise.all([
           window.api.getStatus(),
-          window.api.getAllPlaytime().catch(() => ({}) as PlaytimeMap),
-          window.api.getAuthUser().catch(() => null)
+          window.api.getAllPlaytime().catch(() => ({}) as PlaytimeMap)
         ])
-      : Promise.resolve<[LibraryStatus, PlaytimeMap, AuthUser | null]>([
+      : Promise.resolve<[LibraryStatus, PlaytimeMap]>([
           {
             ok: false,
             games: [],
@@ -274,16 +282,14 @@ function App(): React.JSX.Element {
               'You are viewing the Vite web preview in a browser. Switch to the Sky Launcher Electron desktop window to scan your laptop, open games.json, and launch games.',
             warnings: []
           },
-          {},
-          null
+          {}
         ])
 
     fetchInitial
-      .then(([next, pt, authUser]) => {
+      .then(([next, pt]) => {
         if (!active) return
         setStatus(next)
         setPlaytime(pt)
-        setUser(authUser)
         setIndex((i) => Math.min(i, Math.max(next.games.length - 1, 0)))
       })
       .catch(() => {
@@ -347,10 +353,16 @@ function App(): React.JSX.Element {
   const handleBackupSave = useCallback(async () => {
     const game = latest.current.games[latest.current.index]
     if (!game || !window.api) return
+    if (!auth.currentUser) {
+      setLaunchError('Sign in to back up saves to Firebase Storage.')
+      closeModal()
+      return
+    }
     setSaveBusy(true)
     setLaunchError('')
     try {
-      const res = await window.api.backupGameSave(game.id)
+      const idToken = await auth.currentUser.getIdToken()
+      const res = await window.api.backupGameSave(game.id, idToken)
       if (!res.ok) setLaunchError(res.error ?? 'Could not back up game save.')
     } catch {
       setLaunchError('Could not back up game save.')
@@ -363,10 +375,16 @@ function App(): React.JSX.Element {
   const handleRestoreSave = useCallback(async () => {
     const game = latest.current.games[latest.current.index]
     if (!game || !window.api) return
+    if (!auth.currentUser) {
+      setLaunchError('Sign in to restore saves from Firebase Storage.')
+      closeModal()
+      return
+    }
     setSaveBusy(true)
     setLaunchError('')
     try {
-      const res = await window.api.restoreGameSave(game.id)
+      const idToken = await auth.currentUser.getIdToken()
+      const res = await window.api.restoreGameSave(game.id, idToken)
       if (!res.ok) setLaunchError(res.error ?? 'Could not restore game save.')
     } catch {
       setLaunchError('Could not restore game save.')
@@ -1463,12 +1481,7 @@ function App(): React.JSX.Element {
 
       {/* Profile / Sign-in / Sign-up Modal */}
       {activeModal === 'profile' && (
-        <ProfileModal
-          user={user}
-          onAuthChange={setUser}
-          onSynced={loadLibrary}
-          onClose={closeModal}
-        />
+        <ProfileModal user={user} onSynced={loadLibrary} onClose={closeModal} />
       )}
 
       {/* Add / Edit Game Modal */}

@@ -103,6 +103,7 @@ export function SettingsModal({
           ? {
               firebase: {
                 apiKey: fbApiKey.trim(),
+                authDomain: `${fbProjectId.trim()}.firebaseapp.com`,
                 projectId: fbProjectId.trim(),
                 storageBucket: fbStorageBucket.trim()
               }

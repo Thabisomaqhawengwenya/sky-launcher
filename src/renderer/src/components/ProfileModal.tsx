@@ -1,9 +1,16 @@
 import { useState } from 'react'
+import {
+  GoogleAuthProvider,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut
+} from 'firebase/auth'
+import { auth } from '@lib/firebase'
 import type { AuthUser } from '../../../preload/index.d'
 
 type ProfileModalProps = {
   user: AuthUser | null
-  onAuthChange: (user: AuthUser | null) => void
   onSynced: () => Promise<void>
   onClose: () => void
 }
@@ -33,12 +40,7 @@ function EyeIcon({ visible }: { visible: boolean }): React.JSX.Element {
   )
 }
 
-export function ProfileModal({
-  user,
-  onAuthChange,
-  onSynced,
-  onClose
-}: ProfileModalProps): React.JSX.Element {
+export function ProfileModal({ user, onSynced, onClose }: ProfileModalProps): React.JSX.Element {
   const [mode, setMode] = useState<'signin' | 'signup'>('signin')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -52,11 +54,6 @@ export function ProfileModal({
 
   const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault()
-    if (!window.api) {
-      setError('Firebase sign-in requires the Electron desktop window.')
-      return
-    }
-
     const trimmedEmail = email.trim()
     if (!trimmedEmail || !trimmedEmail.includes('@')) {
       setError('Enter a valid email address.')
@@ -75,35 +72,43 @@ export function ProfileModal({
     setError('')
     setNotice('')
     try {
-      const res =
-        mode === 'signin'
-          ? await window.api.authSignIn(trimmedEmail, password)
-          : await window.api.authSignUp(trimmedEmail, password)
-
-      if (!res.ok || !res.user) {
-        setError(
-          res.error ?? 'Authentication failed. Check your Firebase settings and credentials.'
-        )
-        return
+      if (mode === 'signin') {
+        await signInWithEmailAndPassword(auth, trimmedEmail, password)
+      } else {
+        await createUserWithEmailAndPassword(auth, trimmedEmail, password)
       }
-      onAuthChange(res.user)
       setPassword('')
       setConfirmPassword('')
       setNotice('Signed in to Firebase.')
-    } catch {
-      setError('Could not connect to Firebase Authentication.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Authentication failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleGoogleSignIn = async (): Promise<void> => {
+    setBusy(true)
+    setError('')
+    setNotice('')
+    try {
+      await signInWithPopup(auth, new GoogleAuthProvider())
+      setNotice('Signed in with Google.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Google sign-in failed.')
     } finally {
       setBusy(false)
     }
   }
 
   const handleSyncProfile = async (): Promise<void> => {
-    if (!window.api) return
+    if (!window.api || !auth.currentUser) return
     setSyncing(true)
     setError('')
     setNotice('')
     try {
-      const res = await window.api.syncProfile()
+      const idToken = await auth.currentUser.getIdToken()
+      const res = await window.api.syncProfile(idToken, auth.currentUser.uid)
       if (!res.ok) {
         setError(res.error ?? 'Could not sync profile.')
         return
@@ -118,15 +123,10 @@ export function ProfileModal({
   }
 
   const handleSignOut = async (): Promise<void> => {
-    if (!window.api) {
-      onAuthChange(null)
-      return
-    }
     setBusy(true)
     setError('')
     try {
-      await window.api.authSignOut()
-      onAuthChange(null)
+      await signOut(auth)
       setNotice('')
     } catch {
       setError('Could not sign out.')
@@ -303,6 +303,14 @@ export function ProfileModal({
               <div className="sheet-footer">
                 <button type="submit" className="btn btn-primary" disabled={busy}>
                   {busy ? 'Please wait...' : mode === 'signin' ? 'Sign in' : 'Create account'}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => void handleGoogleSignIn()}
+                  disabled={busy}
+                >
+                  Continue with Google
                 </button>
                 <button type="button" className="btn btn-secondary" onClick={onClose}>
                   Cancel
