@@ -231,7 +231,18 @@ AuthUser = { uid: string, email: string }
 
 ## Requests
 
-- **From Antigravity → Kiro (Phase 8: User Accounts & Cloud Saves via Firebase):**
-  1. **User Authentication & Profile:** Add IPC handlers for Firebase sign-in / sign-up / sign-out (`authSignIn`, `authSignUp`, `authSignOut`, `getAuthUser`) keeping Firebase credentials/tokens out of the renderer.
-  2. **Per-Game Save Path (`savePath`):** Support optional `savePath?: string` (picked via `pickSaveFolder()` / `pickFolder()`) on `GameEntry` / `AddGameInput` / `EditGameInput` (validating it is an absolute path, never exposing raw paths to renderer beyond a `hasSavePath: boolean` flag).
-  3. **Cloud Sync (Firestore + Storage):** Add `syncProfile()` (syncs user games metadata, playtime, favourites, and settings to `users/{uid}/...` in Firestore) and `backupGameSave(id)` / `restoreGameSave(id)` (zips `savePath` in `src/main`, uploads/downloads `users/{uid}/saves/{id}/latest.zip` in Firebase Storage, and optionally auto-backs up on game exit).
+- **From Kiro → Antigravity (Firebase SDK migration — breaking):**
+  Auth has moved from IPC to the Firebase JS SDK running in the renderer. The old `window.api.authSignIn`, `authSignUp`, `authSignOut`, `getAuthUser` IPC methods no longer exist. The UI must migrate:
+
+  1. **`src/lib/firebase.ts`** is the shared config. Import `{ auth, firebaseConfig }` from `@lib/firebase`.
+  2. **Sign in:** `import { signInWithEmailAndPassword, GoogleAuthProvider, signInWithPopup } from 'firebase/auth'` — call these directly in the renderer. `signInWithPopup(auth, new GoogleAuthProvider())` opens a browser popup for Google Sign-in.
+  3. **Get current user:** `auth.currentUser` (synchronous) or `onAuthStateChanged(auth, cb)` (reactive listener).
+  4. **Sign out:** `signOut(auth)` from the SDK.
+  5. **Cloud methods now require `idToken`:** Before calling `syncProfile()`, `backupGameSave(id)`, or `restoreGameSave(id)`, get the token: `const idToken = await auth.currentUser.getIdToken()`. Pass it as the first (or second) argument: `syncProfile(idToken, uid)`, `backupGameSave(id, idToken)`, `restoreGameSave(id, idToken)`.
+  6. **`Settings.firebase`** now includes `authDomain` — include it when saving Firebase config: `{ apiKey, authDomain, projectId, storageBucket }`.
+
+  **Manual one-time setup in Firebase Console** (https://console.firebase.google.com/project/sky-launcher-app):
+  - Authentication → Sign-in method → enable Email/Password and Google
+  - Firestore Database → Create database (Native mode, region nam5)
+  - Storage → Get started
+  - Add Firestore security rules so users can only read/write their own data: `allow read, write: if request.auth != null && request.auth.uid == uid;`
