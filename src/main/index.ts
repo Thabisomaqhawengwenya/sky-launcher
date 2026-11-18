@@ -26,6 +26,7 @@ type RawGame = {
   color?: unknown
   notes?: unknown
   tags?: unknown
+  savePath?: unknown
 }
 
 type Game = {
@@ -38,6 +39,7 @@ type Game = {
   color?: string
   notes?: string
   tags?: string[]
+  savePath?: string
 }
 
 type GameEntry = {
@@ -49,6 +51,7 @@ type GameEntry = {
   autoColor?: string
   notes?: string
   tags?: string[]
+  hasSavePath: boolean
 }
 
 type LaunchResult = { ok: boolean; error?: string }
@@ -65,7 +68,6 @@ type ScanCandidate = {
   exe?: string
   uri?: string
   source: 'steam' | 'epic' | 'gog' | 'folder'
-  /** True if a game with the same URI or exe path already exists in games.json. */
   alreadyInLibrary: boolean
 }
 
@@ -91,20 +93,40 @@ type PlayStats = {
   lastPlayed: string
 }
 
+type FirebaseConfig = {
+  apiKey: string
+  projectId: string
+  storageBucket: string
+}
+
+type AuthState = {
+  idToken: string
+  refreshToken: string
+  uid: string
+  email: string
+  expiresAt: number // ms epoch
+}
+
 type Settings = {
   steamGridDbApiKey?: string
   minimizeOnLaunch?: boolean
-  /** Custom absolute path for games.json. Defaults to userData/games.json. */
   gamesJsonPath?: string
+  autoBackupSaves?: boolean
+  firebase?: FirebaseConfig
+  auth?: AuthState
 }
 
-/** Pushed to the renderer during fetchArtAll. */
 type ArtProgressEvent = {
   id: string
   name: string
   done: number
   total: number
   ok: boolean
+}
+
+type AuthUser = {
+  uid: string
+  email: string
 }
 
 // ---------------------------------------------------------------------------
@@ -156,15 +178,15 @@ const SAMPLE: Game[] = [
   }
 ]
 
+const ART_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
+
 // ---------------------------------------------------------------------------
 // File path helpers
 // ---------------------------------------------------------------------------
 
 function gamesFile(): string {
-  const settings = loadSettings()
-  if (settings.gamesJsonPath && isAbsolute(settings.gamesJsonPath)) {
-    return settings.gamesJsonPath
-  }
+  const s = loadSettings()
+  if (s.gamesJsonPath && isAbsolute(s.gamesJsonPath)) return s.gamesJsonPath
   return join(app.getPath('userData'), 'games.json')
 }
 
@@ -182,6 +204,12 @@ function artCacheDir(): string {
   return dir
 }
 
+function savesDir(): string {
+  const dir = join(app.getPath('userData'), 'saves')
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  return dir
+}
+
 // ---------------------------------------------------------------------------
 // Settings helpers
 // ---------------------------------------------------------------------------
@@ -195,8 +223,41 @@ function loadSettings(): Settings {
     const out: Settings = {}
     if (typeof s.steamGridDbApiKey === 'string') out.steamGridDbApiKey = s.steamGridDbApiKey
     if (typeof s.minimizeOnLaunch === 'boolean') out.minimizeOnLaunch = s.minimizeOnLaunch
+    if (typeof s.autoBackupSaves === 'boolean') out.autoBackupSaves = s.autoBackupSaves
     if (typeof s.gamesJsonPath === 'string' && isAbsolute(s.gamesJsonPath)) {
       out.gamesJsonPath = s.gamesJsonPath
+    }
+    if (typeof s.firebase === 'object' && s.firebase !== null) {
+      const fb = s.firebase as Record<string, unknown>
+      if (
+        typeof fb.apiKey === 'string' &&
+        typeof fb.projectId === 'string' &&
+        typeof fb.storageBucket === 'string'
+      ) {
+        out.firebase = {
+          apiKey: fb.apiKey,
+          projectId: fb.projectId,
+          storageBucket: fb.storageBucket
+        }
+      }
+    }
+    if (typeof s.auth === 'object' && s.auth !== null) {
+      const a = s.auth as Record<string, unknown>
+      if (
+        typeof a.idToken === 'string' &&
+        typeof a.refreshToken === 'string' &&
+        typeof a.uid === 'string' &&
+        typeof a.email === 'string' &&
+        typeof a.expiresAt === 'number'
+      ) {
+        out.auth = {
+          idToken: a.idToken,
+          refreshToken: a.refreshToken,
+          uid: a.uid,
+          email: a.email,
+          expiresAt: a.expiresAt
+        }
+      }
     }
     return out
   } catch {
@@ -276,11 +337,10 @@ function computePlayStats(id: string): PlayStats {
     }
   }
   const sessions = rec.sessions ?? Math.max(1, Math.round(rec.totalMs / 3_600_000))
-  const avgSessionMs = sessions > 0 ? rec.totalMs / sessions : 0
   return {
     sessions,
     totalMs: rec.totalMs,
-    avgSessionMs,
+    avgSessionMs: sessions > 0 ? rec.totalMs / sessions : 0,
     longestSessionMs: rec.totalMs,
     firstPlayed: rec.firstPlayed ?? '',
     lastPlayed: rec.lastPlayed
@@ -325,12 +385,9 @@ function validateEntry(raw: RawGame, index: number): Game | string {
 
   const cover = typeof raw.cover === 'string' && raw.cover ? raw.cover : undefined
   const color = typeof raw.color === 'string' && raw.color ? raw.color : undefined
-
-  // Notes: string, trimmed, max 500 chars
   const notes =
     typeof raw.notes === 'string' && raw.notes.trim() ? raw.notes.trim().slice(0, 500) : undefined
 
-  // Tags: array of non-empty strings, max 20 tags, max 30 chars each
   let tags: string[] | undefined
   if (Array.isArray(raw.tags)) {
     const filtered = (raw.tags as unknown[])
@@ -342,6 +399,15 @@ function validateEntry(raw: RawGame, index: number): Game | string {
     if (filtered.length > 0) tags = filtered
   }
 
+  // savePath: optional absolute path to the game's save-data folder
+  let savePath: string | undefined
+  if (raw.savePath !== undefined) {
+    if (typeof raw.savePath !== 'string') return `${label}: "savePath" must be a string`
+    if (!isAbsolute(raw.savePath))
+      return `${label}: "savePath" must be an absolute path (got "${raw.savePath}")`
+    savePath = raw.savePath
+  }
+
   return {
     id,
     name,
@@ -351,7 +417,8 @@ function validateEntry(raw: RawGame, index: number): Game | string {
     cover,
     color,
     notes,
-    tags
+    tags,
+    savePath
   }
 }
 
@@ -402,39 +469,33 @@ function loadGames(): LoadResult {
 }
 
 // ---------------------------------------------------------------------------
-// Dominant colour extraction (Feature 1)
+// Dominant colour extraction
 // ---------------------------------------------------------------------------
 
 function rgbToHsl(r: number, g: number, b: number): { h: number; s: number; l: number } {
-  const rn = r / 255
-  const gn = g / 255
-  const bn = b / 255
-  const max = Math.max(rn, gn, bn)
-  const min = Math.min(rn, gn, bn)
+  const rn = r / 255,
+    gn = g / 255,
+    bn = b / 255
+  const max = Math.max(rn, gn, bn),
+    min = Math.min(rn, gn, bn)
   const l = (max + min) / 2
   if (max === min) return { h: 0, s: 0, l }
   const d = max - min
   const s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
   let h: number
-  if (max === rn) {
-    h = (gn - bn) / d + (gn < bn ? 6 : 0)
-  } else if (max === gn) {
-    h = (bn - rn) / d + 2
-  } else {
-    h = (rn - gn) / d + 4
-  }
-  h /= 6
-  return { h, s, l }
+  if (max === rn) h = (gn - bn) / d + (gn < bn ? 6 : 0)
+  else if (max === gn) h = (bn - rn) / d + 2
+  else h = (rn - gn) / d + 4
+  return { h: h / 6, s, l }
 }
 
 function extractDominantColor(buf: Buffer): string {
   const MAX_SAMPLES = 200
   const step = Math.max(3, Math.floor(buf.length / MAX_SAMPLES))
-
-  let bestR = 47
-  let bestG = 107
-  let bestB = 255
-  let bestSat = -1
+  let bestR = 47,
+    bestG = 107,
+    bestB = 255,
+    bestSat = -1
 
   for (let offset = 0; offset + 2 < buf.length; offset += step) {
     const r = Math.max(0, Math.min(255, buf[offset]))
@@ -450,7 +511,6 @@ function extractDominantColor(buf: Buffer): string {
   }
 
   if (bestSat < 0) return '#2f6bff'
-
   return `#${Math.round(bestR).toString(16).padStart(2, '0')}${Math.round(bestG).toString(16).padStart(2, '0')}${Math.round(bestB).toString(16).padStart(2, '0')}`
 }
 
@@ -458,15 +518,13 @@ function extractDominantColor(buf: Buffer): string {
 // Art helpers
 // ---------------------------------------------------------------------------
 
-const ART_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
-
 function artMetaPath(imagePath: string): string {
   return `${imagePath}.meta.json`
 }
 
 function isCacheStale(imagePath: string): boolean {
   const metaPath = artMetaPath(imagePath)
-  if (!existsSync(metaPath)) return false // no sidecar → treat as valid (backwards compat)
+  if (!existsSync(metaPath)) return false
   try {
     const raw: unknown = JSON.parse(readFileSync(metaPath, 'utf-8'))
     if (typeof raw !== 'object' || raw === null) return false
@@ -505,13 +563,9 @@ function cachedArtPaths(id: string): { cover?: string; hero?: string } {
   const dir = artCacheDir()
   const coverPath = join(dir, `${id}-cover.png`)
   const heroPath = join(dir, `${id}-hero.png`)
-
-  const coverExists = existsSync(coverPath)
-  const heroExists = existsSync(heroPath)
-
   return {
-    cover: coverExists && !isCacheStale(coverPath) ? coverPath : undefined,
-    hero: heroExists && !isCacheStale(heroPath) ? heroPath : undefined
+    cover: existsSync(coverPath) && !isCacheStale(coverPath) ? coverPath : undefined,
+    hero: existsSync(heroPath) && !isCacheStale(heroPath) ? heroPath : undefined
   }
 }
 
@@ -523,18 +577,15 @@ async function toEntry(g: Game): Promise<GameEntry> {
     (g.exe ? await exeIconDataUrl(g.exe) : undefined)
   const hero: string | undefined = toDataUrl(cached.hero)
 
-  // Derive auto colour from cover art when no user colour is set
   let autoColor: string | undefined
   if (!g.color && cover && cover.startsWith('data:')) {
     try {
       const commaIdx = cover.indexOf(',')
       if (commaIdx !== -1) {
-        const b64 = cover.slice(commaIdx + 1)
-        const buf = Buffer.from(b64, 'base64')
-        autoColor = extractDominantColor(buf)
+        autoColor = extractDominantColor(Buffer.from(cover.slice(commaIdx + 1), 'base64'))
       }
     } catch {
-      // Non-critical — skip auto colour on failure.
+      // Non-critical.
     }
   }
 
@@ -546,7 +597,8 @@ async function toEntry(g: Game): Promise<GameEntry> {
     cover,
     hero,
     notes: g.notes,
-    tags: g.tags
+    tags: g.tags,
+    hasSavePath: Boolean(g.savePath)
   }
 }
 
@@ -556,10 +608,13 @@ async function toEntry(g: Game): Promise<GameEntry> {
 
 const SGDB_BASE = 'https://www.steamgriddb.com/api/v2'
 
-function fetchJson(url: string, apiKey: string): Promise<unknown> {
+function netFetchJson(
+  url: string,
+  options: { headers?: Record<string, string> } = {}
+): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const req = net.request({ url, method: 'GET' })
-    req.setHeader('Authorization', `Bearer ${apiKey}`)
+    for (const [k, v] of Object.entries(options.headers ?? {})) req.setHeader(k, v)
     req.setHeader('Accept', 'application/json')
     const chunks: Buffer[] = []
     req.on('response', (res) => {
@@ -578,16 +633,22 @@ function fetchJson(url: string, apiKey: string): Promise<unknown> {
   })
 }
 
-function fetchBinary(url: string): Promise<Buffer> {
+function netFetchBinary(
+  url: string,
+  options: { headers?: Record<string, string>; method?: string; body?: string } = {}
+): Promise<{ status: number; body: Buffer }> {
   return new Promise((resolve, reject) => {
-    const req = net.request({ url, method: 'GET' })
+    const req = net.request({ url, method: options.method ?? 'GET' })
+    for (const [k, v] of Object.entries(options.headers ?? {})) req.setHeader(k, v)
     const chunks: Buffer[] = []
     req.on('response', (res) => {
+      const status = res.statusCode ?? 0
       res.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
-      res.on('end', () => resolve(Buffer.concat(chunks)))
+      res.on('end', () => resolve({ status, body: Buffer.concat(chunks) }))
       res.on('error', reject)
     })
     req.on('error', reject)
+    if (options.body) req.write(options.body)
     req.end()
   })
 }
@@ -607,10 +668,11 @@ async function fetchSgdbArt(
 ): Promise<SgdbArtResult> {
   try {
     let sgdbId: number | null = null
+    const headers = { Authorization: `Bearer ${apiKey}` }
 
     const steamAppId = steamAppIdFromUri(uri)
     if (steamAppId) {
-      const res = (await fetchJson(`${SGDB_BASE}/games/steam/${steamAppId}`, apiKey)) as {
+      const res = (await netFetchJson(`${SGDB_BASE}/games/steam/${steamAppId}`, { headers })) as {
         success?: boolean
         data?: { id?: number }
       }
@@ -619,7 +681,7 @@ async function fetchSgdbArt(
 
     if (sgdbId === null) {
       const q = encodeURIComponent(gameName)
-      const res = (await fetchJson(`${SGDB_BASE}/search/autocomplete/${q}`, apiKey)) as {
+      const res = (await netFetchJson(`${SGDB_BASE}/search/autocomplete/${q}`, { headers })) as {
         success?: boolean
         data?: Array<{ id?: number }>
       }
@@ -632,16 +694,18 @@ async function fetchSgdbArt(
     if (sgdbId === null) return {}
 
     let coverUrl: string | undefined
-    const gridRes = (await fetchJson(
-      `${SGDB_BASE}/grids/game/${sgdbId}?dimensions=600x900`,
-      apiKey
-    )) as { success?: boolean; data?: Array<{ url?: string }> }
+    const gridRes = (await netFetchJson(`${SGDB_BASE}/grids/game/${sgdbId}?dimensions=600x900`, {
+      headers
+    })) as {
+      success?: boolean
+      data?: Array<{ url?: string }>
+    }
     if (gridRes.success && Array.isArray(gridRes.data) && gridRes.data.length > 0) {
       coverUrl = gridRes.data[0].url
     }
 
     let heroUrl: string | undefined
-    const heroRes = (await fetchJson(`${SGDB_BASE}/heroes/game/${sgdbId}`, apiKey)) as {
+    const heroRes = (await netFetchJson(`${SGDB_BASE}/heroes/game/${sgdbId}`, { headers })) as {
       success?: boolean
       data?: Array<{ url?: string }>
     }
@@ -657,9 +721,8 @@ async function fetchSgdbArt(
 
 async function downloadAndCache(url: string, destPath: string): Promise<string | undefined> {
   try {
-    const buf = await fetchBinary(url)
-    writeFileSync(destPath, buf)
-    // Write sidecar metadata for stale-cache invalidation (Feature 6)
+    const { body } = await netFetchBinary(url)
+    writeFileSync(destPath, body)
     writeFileSync(
       artMetaPath(destPath),
       JSON.stringify({ fetchedAt: new Date().toISOString() }),
@@ -672,7 +735,177 @@ async function downloadAndCache(url: string, destPath: string): Promise<string |
 }
 
 // ---------------------------------------------------------------------------
-// Now Playing pill window (Feature 2)
+// Firebase Auth (REST — no npm dependency)
+// ---------------------------------------------------------------------------
+
+const FB_AUTH_BASE = 'https://identitytoolkit.googleapis.com/v1'
+const FB_TOKEN_BASE = 'https://securetoken.googleapis.com/v1'
+
+async function firebaseRequest(
+  url: string,
+  body: Record<string, unknown>
+): Promise<{ status: number; data: unknown }> {
+  const payload = JSON.stringify(body)
+  const { status, body: resBuf } = await netFetchBinary(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: payload
+  })
+  let data: unknown
+  try {
+    data = JSON.parse(resBuf.toString('utf-8'))
+  } catch {
+    data = {}
+  }
+  return { status, data }
+}
+
+/** Refresh the idToken using the stored refreshToken. Updates settings.json. */
+async function refreshIdToken(settings: Settings): Promise<Settings | null> {
+  if (!settings.firebase?.apiKey || !settings.auth?.refreshToken) return null
+  try {
+    const { status, data } = await firebaseRequest(
+      `${FB_TOKEN_BASE}/token?key=${settings.firebase.apiKey}`,
+      { grant_type: 'refresh_token', refresh_token: settings.auth.refreshToken }
+    )
+    if (status !== 200) return null
+    const d = data as Record<string, unknown>
+    if (typeof d.id_token !== 'string') return null
+
+    const expiresIn = typeof d.expires_in === 'string' ? parseInt(d.expires_in, 10) : 3600
+    const newAuth: AuthState = {
+      ...settings.auth,
+      idToken: d.id_token,
+      refreshToken:
+        typeof d.refresh_token === 'string' ? d.refresh_token : settings.auth.refreshToken,
+      expiresAt: Date.now() + expiresIn * 1000 - 60_000 // 1 min safety margin
+    }
+    saveSettings({ auth: newAuth })
+    return { ...settings, auth: newAuth }
+  } catch {
+    return null
+  }
+}
+
+/** Returns a valid idToken, refreshing if needed. Returns null if not signed in. */
+async function getValidToken(): Promise<string | null> {
+  let settings = loadSettings()
+  if (!settings.auth) return null
+
+  if (Date.now() < settings.auth.expiresAt) return settings.auth.idToken
+
+  const refreshed = await refreshIdToken(settings)
+  if (!refreshed?.auth) return null
+  settings = refreshed
+  return settings.auth!.idToken
+}
+
+// ---------------------------------------------------------------------------
+// Firestore REST helpers
+// ---------------------------------------------------------------------------
+
+function firestoreUrl(projectId: string, path: string): string {
+  return `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/${path}`
+}
+
+/** Convert a plain JS object into a Firestore fields map. Only handles string/number/bool/null/object/array. */
+function toFirestoreFields(obj: Record<string, unknown>): Record<string, unknown> {
+  const convert = (val: unknown): unknown => {
+    if (val === null || val === undefined) return { nullValue: null }
+    if (typeof val === 'boolean') return { booleanValue: val }
+    if (typeof val === 'number')
+      return Number.isInteger(val) ? { integerValue: String(val) } : { doubleValue: val }
+    if (typeof val === 'string') return { stringValue: val }
+    if (Array.isArray(val)) return { arrayValue: { values: val.map(convert) } }
+    if (typeof val === 'object') {
+      const fields: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+        fields[k] = convert(v)
+      }
+      return { mapValue: { fields } }
+    }
+    return { stringValue: String(val) }
+  }
+
+  const fields: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) {
+    fields[k] = convert(v)
+  }
+  return fields
+}
+
+/** Write a Firestore document (PATCH/create-or-replace). */
+async function firestoreWrite(
+  projectId: string,
+  path: string,
+  data: Record<string, unknown>,
+  idToken: string
+): Promise<boolean> {
+  try {
+    const url = firestoreUrl(projectId, path)
+    const body = JSON.stringify({ fields: toFirestoreFields(data) })
+    const { status } = await netFetchBinary(url, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        'Content-Type': 'application/json'
+      },
+      body
+    })
+    return status >= 200 && status < 300
+  } catch {
+    return false
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Save folder zip / unzip (PowerShell — no npm dependency, Windows-only)
+// ---------------------------------------------------------------------------
+
+function psExec(command: string): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    execFile(
+      'powershell',
+      ['-NoProfile', '-NonInteractive', '-Command', command],
+      { timeout: 30_000 },
+      (err, _stdout, stderr) => {
+        if (err) resolve({ ok: false, error: stderr.trim() || err.message })
+        else resolve({ ok: true })
+      }
+    )
+  })
+}
+
+/** Zip a folder to a destination .zip file. Overwrites if it exists. */
+async function zipFolder(
+  folderPath: string,
+  zipPath: string
+): Promise<{ ok: boolean; error?: string }> {
+  if (existsSync(zipPath)) {
+    try {
+      const { unlinkSync } = await import('fs')
+      unlinkSync(zipPath)
+    } catch {
+      /* ignore */
+    }
+  }
+  const src = folderPath.replace(/'/g, "''")
+  const dst = zipPath.replace(/'/g, "''")
+  return psExec(`Compress-Archive -Path '${src}' -DestinationPath '${dst}' -Force`)
+}
+
+/** Unzip a .zip file into a destination folder. */
+async function unzipToFolder(
+  zipPath: string,
+  destFolder: string
+): Promise<{ ok: boolean; error?: string }> {
+  const src = zipPath.replace(/'/g, "''")
+  const dst = destFolder.replace(/'/g, "''")
+  return psExec(`Expand-Archive -Path '${src}' -DestinationPath '${dst}' -Force`)
+}
+
+// ---------------------------------------------------------------------------
+// Now Playing pill window
 // ---------------------------------------------------------------------------
 
 let pillWin: BrowserWindow | null = null
@@ -686,14 +919,12 @@ function escapeHtml(str: string): string {
 }
 
 function showPillWindow(gameName: string): void {
-  // Close any existing pill before showing a new one
   if (pillWin && !pillWin.isDestroyed()) {
     pillWin.destroy()
     pillWin = null
   }
 
   const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
-
   const win = new BrowserWindow({
     width: 220,
     height: 52,
@@ -705,34 +936,26 @@ function showPillWindow(gameName: string): void {
     skipTaskbar: true,
     resizable: false,
     show: false,
-    webPreferences: {
-      sandbox: false,
-      contextIsolation: true,
-      nodeIntegration: false
-    }
+    webPreferences: { sandbox: false, contextIsolation: true, nodeIntegration: false }
   })
 
   const safeName = escapeHtml(gameName)
   const html = `<!doctype html><html><head><meta charset="UTF-8"><style>*{margin:0;padding:0;box-sizing:border-box}html,body{height:100%;overflow:hidden;-webkit-app-region:drag;font-family:'Segoe UI',system-ui,sans-serif;background:rgba(10,15,28,0.92);backdrop-filter:blur(12px);border-radius:14px;border:1px solid rgba(255,255,255,0.12);color:#f4f6fb}body{display:flex;align-items:center;gap:12px;padding:0 16px}#dot{width:8px;height:8px;border-radius:50%;background:#22c55e;flex-shrink:0;animation:pulse 1.8s ease-in-out infinite}@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}#name{font-size:13px;font-weight:600;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;flex:1}#close{-webkit-app-region:no-drag;width:22px;height:22px;border-radius:50%;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:#f4f6fb;font-size:13px;cursor:pointer;display:grid;place-items:center;flex-shrink:0}</style></head><body><div id="dot"></div><span id="name">${safeName}</span><button id="close" onclick="window.close()">&#x2715;</button></body></html>`
 
   win.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(html)}`)
-
   win.once('ready-to-show', () => {
     if (!win.isDestroyed()) win.show()
   })
-
   pillWin = win
 }
 
 function hidePillWindow(): void {
-  if (pillWin && !pillWin.isDestroyed()) {
-    pillWin.destroy()
-  }
+  if (pillWin && !pillWin.isDestroyed()) pillWin.destroy()
   pillWin = null
 }
 
 // ---------------------------------------------------------------------------
-// Launch helper — returns the ChildProcess + earlyExitPromise for crash detection
+// Launch helper
 // ---------------------------------------------------------------------------
 
 type LaunchExeResult = {
@@ -744,36 +967,29 @@ type LaunchExeResult = {
 function launchExeProcess(exe: string, args: string[]): Promise<LaunchExeResult> {
   return new Promise((resolve) => {
     const child = spawn(exe, args, { cwd: dirname(exe), detached: true, stdio: 'ignore' })
-
     child.once('error', (err) => {
       resolve({
         result: { ok: false, error: err.message },
         earlyExitPromise: Promise.resolve(false)
       })
     })
-
     child.once('spawn', () => {
-      // Feature 7: Early crash detection — watch for non-zero exit within 4 seconds
       const earlyExitPromise = new Promise<boolean>((resolveCrash) => {
         let settled = false
-
         const timer = setTimeout(() => {
           if (!settled) {
             settled = true
             resolveCrash(false)
           }
         }, 4000)
-
         child.once('exit', (code, signal) => {
           if (!settled) {
             settled = true
             clearTimeout(timer)
-            const crashed = code !== 0 || signal !== null
-            resolveCrash(crashed)
+            resolveCrash(code !== 0 || signal !== null)
           }
         })
       })
-
       resolve({ result: { ok: true }, child, earlyExitPromise })
     })
   })
@@ -875,9 +1091,9 @@ async function scanSteam(): Promise<Omit<ScanCandidate, 'alreadyInLibrary'>[]> {
     for (const mf of manifests) {
       try {
         const kv = parseVdfFlat(readFileSync(join(appsDir, mf), 'utf-8'))
-        const appid = kv.get('appid')
-        const name = kv.get('name')
-        const installdir = kv.get('installdir')
+        const appid = kv.get('appid'),
+          name = kv.get('name'),
+          installdir = kv.get('installdir')
         if (!appid || !name || !installdir) continue
         candidates.push({ name, uri: `steam://rungameid/${appid}`, source: 'steam' })
       } catch {
@@ -907,11 +1123,11 @@ async function scanEpic(): Promise<Omit<ScanCandidate, 'alreadyInLibrary'>[]> {
   for (const file of files) {
     try {
       const raw = JSON.parse(readFileSync(join(manifestDir, file), 'utf-8'))
-      const name: unknown = raw.DisplayName
-      const location: unknown = raw.InstallLocation
+      const name: unknown = raw.DisplayName,
+        location: unknown = raw.InstallLocation
       const launchExe: unknown = raw.LaunchExecutable
-      const catalogItemId: unknown = raw.CatalogItemId
-      const namespaceProp: unknown = raw.CatalogNamespace
+      const catalogItemId: unknown = raw.CatalogItemId,
+        namespaceProp: unknown = raw.CatalogNamespace
       if (typeof name !== 'string' || !name) continue
       if (typeof location !== 'string' || !location) continue
       if (typeof launchExe !== 'string' || !launchExe) continue
@@ -942,8 +1158,6 @@ async function scanGog(): Promise<Omit<ScanCandidate, 'alreadyInLibrary'>[]> {
       regQuery(subkey, 'gameID')
     ])
     if (!name) continue
-
-    // Prefer GOG Galaxy URI so Galaxy handles DRM and updates.
     if (gameId) {
       candidates.push({ name, uri: `goggalaxy://openGame/${gameId}`, source: 'gog' })
     } else if (exe && isAbsolute(exe) && existsSync(exe)) {
@@ -984,10 +1198,6 @@ function scanFolder(folderPath: string, depth = 3): Omit<ScanCandidate, 'already
   return candidates
 }
 
-/**
- * Mark candidates that already exist in the library (by URI or exe path).
- * Hard duplicates are not filtered out — the UI decides whether to show them.
- */
 function markDuplicates(
   candidates: Omit<ScanCandidate, 'alreadyInLibrary'>[],
   existing: Game[]
@@ -1004,28 +1214,23 @@ function markDuplicates(
 }
 
 // ---------------------------------------------------------------------------
-// games.json file watcher — pushes library:changed to the renderer
+// games.json file watcher
 // ---------------------------------------------------------------------------
 
 let watcherDebounce: ReturnType<typeof setTimeout> | null = null
 
 function startGamesFileWatcher(win: BrowserWindow): void {
   const file = gamesFile()
-  // Ensure the file exists before watching.
   if (!existsSync(file)) loadGames()
-
   try {
     watch(file, () => {
-      // Debounce: editors write multiple events on save.
       if (watcherDebounce) clearTimeout(watcherDebounce)
       watcherDebounce = setTimeout(() => {
-        if (!win.isDestroyed()) {
-          win.webContents.send('library:changed')
-        }
+        if (!win.isDestroyed()) win.webContents.send('library:changed')
       }, 500)
     })
   } catch {
-    // If watch fails (network drive, permission, etc.) just skip it.
+    // Skip if watch fails (network drive, permission, etc.)
   }
 }
 
@@ -1033,7 +1238,6 @@ function startGamesFileWatcher(win: BrowserWindow): void {
 // Window
 // ---------------------------------------------------------------------------
 
-/** Id of the game whose session should end when the window next regains focus. */
 let pendingSessionEnd: string | null = null
 
 function createWindow(): void {
@@ -1057,14 +1261,11 @@ function createWindow(): void {
     if (process.platform === 'win32') win.moveTop()
   })
 
-  // End session when the user returns to the launcher (focus-based fallback
-  // for URI launches where we can't watch the process directly).
   win.on('focus', () => {
     if (pendingSessionEnd) {
       recordSessionEnd(pendingSessionEnd)
       pendingSessionEnd = null
     }
-    // URI game ended: hide pill when launcher is re-focused
     hidePillWindow()
   })
 
@@ -1079,10 +1280,7 @@ function createWindow(): void {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
-  // Start the games.json file watcher after the window is ready.
   win.webContents.once('did-finish-load', () => startGamesFileWatcher(win))
-
-  return
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,23 +1335,15 @@ app.whenReady().then(() => {
 
       if (game.uri) {
         if (!ALLOWED_URI.test(game.uri))
-          return {
-            ok: false,
-            error: 'Only steam://, Epic, and GOG Galaxy links are allowed.'
-          }
+          return { ok: false, error: 'Only steam://, Epic, and GOG Galaxy links are allowed.' }
         await shell.openExternal(game.uri)
         result = { ok: true }
-        // URI launches: use focus-based session end (can't watch external processes).
         recordLaunch(id)
         pendingSessionEnd = id
-        // Show pill for URI launch
         showPillWindow(game.name)
       } else if (game.exe) {
         if (!existsSync(game.exe))
-          return {
-            ok: false,
-            error: `Can't find "${game.exe}". Check the exe path in games.json.`
-          }
+          return { ok: false, error: `Can't find "${game.exe}". Check the exe path in games.json.` }
         const {
           result: launchRes,
           child,
@@ -1162,16 +1352,26 @@ app.whenReady().then(() => {
         result = launchRes
         if (result.ok && child) {
           recordLaunch(id)
-          // Show pill for exe launch
           showPillWindow(game.name)
-          // Process exit detection: end session precisely when the game exits.
           child.once('exit', () => {
             recordSessionEnd(id)
             hidePillWindow()
-            // Notify the renderer so it can refresh playtime immediately.
             BrowserWindow.getAllWindows()[0]?.webContents.send('playtime:updated', id)
+
+            // Auto-backup save on exit if configured
+            const s = loadSettings()
+            if (s.autoBackupSaves && game.savePath && existsSync(game.savePath)) {
+              void (async () => {
+                const token = await getValidToken()
+                if (!token || !s.firebase) return
+                const zipPath = join(savesDir(), `${game.id}-autosave.zip`)
+                const zipped = await zipFolder(game.savePath!, zipPath)
+                if (zipped.ok) {
+                  await uploadSaveZip(game.id, zipPath, token, s.firebase)
+                }
+              })()
+            }
           })
-          // Feature 7: Early crash detection
           void earlyExitPromise.then((crashed) => {
             if (crashed) {
               const mainWin = BrowserWindow.getAllWindows()[0]
@@ -1201,7 +1401,7 @@ app.whenReady().then(() => {
       loadGames()
       shell.showItemInFolder(gamesFile())
     } catch {
-      // Not worth surfacing.
+      /* silent */
     }
   })
 
@@ -1215,8 +1415,7 @@ app.whenReady().then(() => {
       shell.showItemInFolder(game.exe)
       return { ok: true }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return { ok: false, error: msg }
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
 
@@ -1251,6 +1450,15 @@ app.whenReady().then(() => {
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
 
+  ipcMain.handle('games:pick-save-folder', async (): Promise<string | null> => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Select game save-data folder',
+      properties: ['openDirectory']
+    })
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
+
   // ── CRUD ──────────────────────────────────────────────────────────────────
 
   ipcMain.handle('games:add', async (_e, input: unknown): Promise<WriteResult> => {
@@ -1265,8 +1473,10 @@ app.whenReady().then(() => {
       saveGames(games)
       return { ok: true, game: await toEntry(result) }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return { ok: false, error: `Could not save game: ${msg}` }
+      return {
+        ok: false,
+        error: `Could not save game: ${err instanceof Error ? err.message : String(err)}`
+      }
     }
   })
 
@@ -1289,7 +1499,8 @@ app.whenReady().then(() => {
         cover: p.cover ?? existing.cover,
         color: p.color ?? existing.color,
         notes: p.notes ?? existing.notes,
-        tags: p.tags ?? existing.tags
+        tags: p.tags ?? existing.tags,
+        savePath: p.savePath ?? existing.savePath
       }
       const result = validateEntry(merged, idx)
       if (typeof result === 'string') return { ok: false, error: result }
@@ -1297,8 +1508,10 @@ app.whenReady().then(() => {
       saveGames(games)
       return { ok: true, game: await toEntry(result) }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return { ok: false, error: `Could not update game: ${msg}` }
+      return {
+        ok: false,
+        error: `Could not update game: ${err instanceof Error ? err.message : String(err)}`
+      }
     }
   })
 
@@ -1313,8 +1526,10 @@ app.whenReady().then(() => {
       saveGames(filtered)
       return { ok: true }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return { ok: false, error: `Could not remove game: ${msg}` }
+      return {
+        ok: false,
+        error: `Could not remove game: ${err instanceof Error ? err.message : String(err)}`
+      }
     }
   })
 
@@ -1323,8 +1538,7 @@ app.whenReady().then(() => {
   ipcMain.handle('games:scan', async (): Promise<ScanCandidate[]> => {
     try {
       const [steam, epic, gog] = await Promise.all([scanSteam(), scanEpic(), scanGog()])
-      const { games } = loadGames()
-      return markDuplicates([...steam, ...epic, ...gog], games)
+      return markDuplicates([...steam, ...epic, ...gog], loadGames().games)
     } catch (err) {
       console.error('games:scan error:', err instanceof Error ? err.message : String(err))
       return []
@@ -1335,8 +1549,7 @@ app.whenReady().then(() => {
     if (typeof folderPath !== 'string' || !folderPath.trim()) return []
     if (!isAbsolute(folderPath) || !existsSync(folderPath)) return []
     try {
-      const { games } = loadGames()
-      return markDuplicates(scanFolder(folderPath), games)
+      return markDuplicates(scanFolder(folderPath), loadGames().games)
     } catch {
       return []
     }
@@ -1344,7 +1557,11 @@ app.whenReady().then(() => {
 
   // ── Settings ──────────────────────────────────────────────────────────────
 
-  ipcMain.handle('settings:get', (): Settings => loadSettings())
+  ipcMain.handle('settings:get', (): Omit<Settings, 'auth'> => {
+    const { auth: _, ...rest } = loadSettings()
+    void _
+    return rest
+  })
 
   ipcMain.handle('settings:set', (_e, patch: unknown): LaunchResult => {
     if (typeof patch !== 'object' || patch === null) return { ok: false, error: 'Invalid patch.' }
@@ -1353,42 +1570,54 @@ app.whenReady().then(() => {
       const safe: Partial<Settings> = {}
       if (typeof p.steamGridDbApiKey === 'string') safe.steamGridDbApiKey = p.steamGridDbApiKey
       if (typeof p.minimizeOnLaunch === 'boolean') safe.minimizeOnLaunch = p.minimizeOnLaunch
-      if (typeof p.gamesJsonPath === 'string') {
-        // Accept empty string to reset to default.
+      if (typeof p.autoBackupSaves === 'boolean') safe.autoBackupSaves = p.autoBackupSaves
+      if (typeof p.gamesJsonPath === 'string')
         safe.gamesJsonPath = p.gamesJsonPath.trim() || undefined
+      if (typeof p.firebase === 'object' && p.firebase !== null) {
+        const fb = p.firebase as Record<string, unknown>
+        if (
+          typeof fb.apiKey === 'string' &&
+          typeof fb.projectId === 'string' &&
+          typeof fb.storageBucket === 'string'
+        ) {
+          safe.firebase = {
+            apiKey: fb.apiKey,
+            projectId: fb.projectId,
+            storageBucket: fb.storageBucket
+          }
+        }
       }
       saveSettings(safe)
       return { ok: true }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return { ok: false, error: `Could not save settings: ${msg}` }
+      return {
+        ok: false,
+        error: `Could not save settings: ${err instanceof Error ? err.message : String(err)}`
+      }
     }
   })
 
-  // ── Auto-launch on startup (Feature 4) ───────────────────────────────────
-
-  ipcMain.handle('settings:get-login-item', (): { enabled: boolean } => {
-    return { enabled: app.getLoginItemSettings().openAtLogin }
-  })
+  ipcMain.handle('settings:get-login-item', (): { enabled: boolean } => ({
+    enabled: app.getLoginItemSettings().openAtLogin
+  }))
 
   ipcMain.handle('settings:set-login-item', (_e, payload: unknown): LaunchResult => {
-    if (typeof payload !== 'object' || payload === null) {
+    if (typeof payload !== 'object' || payload === null)
       return { ok: false, error: 'Invalid payload.' }
-    }
     const p = payload as Record<string, unknown>
-    if (typeof p.enabled !== 'boolean') {
-      return { ok: false, error: '"enabled" must be a boolean.' }
-    }
+    if (typeof p.enabled !== 'boolean') return { ok: false, error: '"enabled" must be a boolean.' }
     try {
       app.setLoginItemSettings({ openAtLogin: p.enabled })
       return { ok: true }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return { ok: false, error: `Could not update login item: ${msg}` }
+      return {
+        ok: false,
+        error: `Could not update login item: ${err instanceof Error ? err.message : String(err)}`
+      }
     }
   })
 
-  // ── Pill hide (Feature 2) ─────────────────────────────────────────────────
+  // ── Pill ──────────────────────────────────────────────────────────────────
 
   ipcMain.handle('pill:hide', (): void => {
     hidePillWindow()
@@ -1398,38 +1627,27 @@ app.whenReady().then(() => {
 
   ipcMain.handle('games:fetch-art', async (_e, id: unknown): Promise<WriteResult> => {
     if (typeof id !== 'string' || !id.trim()) return { ok: false, error: 'Invalid game id.' }
-
     const { steamGridDbApiKey } = loadSettings()
     if (!steamGridDbApiKey)
       return {
         ok: false,
         error: 'No SteamGridDB API key set. Add one in Settings to fetch cover art.'
       }
-
     const { games } = loadGames()
     const game = games.find((g) => g.id === id)
     if (!game) return { ok: false, error: `Game "${id}" not found.` }
-
     const { coverUrl, heroUrl } = await fetchSgdbArt(game.name, game.uri, steamGridDbApiKey)
     const dir = artCacheDir()
     if (coverUrl) await downloadAndCache(coverUrl, join(dir, `${game.id}-cover.png`))
     if (heroUrl) await downloadAndCache(heroUrl, join(dir, `${game.id}-hero.png`))
-
     if (!coverUrl && !heroUrl)
       return { ok: false, error: `No art found for "${game.name}" on SteamGridDB.` }
-
     return { ok: true, game: await toEntry(game) }
   })
 
-  /**
-   * Fetch art for all games lacking cached art.
-   * Pushes art:progress events to the renderer as each game completes,
-   * then art:done when the batch is finished.
-   */
   ipcMain.handle('games:fetch-art-all', async (): Promise<{ ok: boolean; queued: number }> => {
     const { steamGridDbApiKey } = loadSettings()
     if (!steamGridDbApiKey) return { ok: false, queued: 0 }
-
     const { games } = loadGames()
     const needsArt = games.filter((g) => {
       const { cover, hero } = cachedArtPaths(g.id)
@@ -1441,13 +1659,11 @@ app.whenReady().then(() => {
       const dir = artCacheDir()
       let done = 0
       const total = needsArt.length
-
       for (const game of needsArt) {
         const { coverUrl, heroUrl } = await fetchSgdbArt(game.name, game.uri, steamGridDbApiKey)
         if (coverUrl) await downloadAndCache(coverUrl, join(dir, `${game.id}-cover.png`))
         if (heroUrl) await downloadAndCache(heroUrl, join(dir, `${game.id}-hero.png`))
         done++
-
         const event: ArtProgressEvent = {
           id: game.id,
           name: game.name,
@@ -1457,7 +1673,6 @@ app.whenReady().then(() => {
         }
         BrowserWindow.getAllWindows()[0]?.webContents.send('art:progress', event)
       }
-
       BrowserWindow.getAllWindows()[0]?.webContents.send('art:done')
     })()
 
@@ -1473,10 +1688,8 @@ app.whenReady().then(() => {
 
   ipcMain.handle('playtime:get-all', (): PlaytimeMap => loadPlaytime())
 
-  // ── Play stats (Feature 3) ────────────────────────────────────────────────
-
   ipcMain.handle('playtime:stats', (_e, id: unknown): PlayStats => {
-    if (typeof id !== 'string' || !id.trim()) {
+    if (typeof id !== 'string' || !id.trim())
       return {
         sessions: 0,
         totalMs: 0,
@@ -1485,11 +1698,10 @@ app.whenReady().then(() => {
         firstPlayed: '',
         lastPlayed: ''
       }
-    }
     return computePlayStats(id)
   })
 
-  // ── Library export / import (Feature 8) ──────────────────────────────────
+  // ── Library export / import ───────────────────────────────────────────────
 
   ipcMain.handle('games:export', async (): Promise<LaunchResult> => {
     const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
@@ -1500,13 +1712,14 @@ app.whenReady().then(() => {
         filters: [{ name: 'JSON', extensions: ['json'] }]
       })
       if (result.canceled || !result.filePath) return { ok: false, error: 'Cancelled.' }
-
       const content = readFileSync(gamesFile(), 'utf-8')
       writeFileSync(result.filePath, content, 'utf-8')
       return { ok: true }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return { ok: false, error: `Export failed: ${msg}` }
+      return {
+        ok: false,
+        error: `Export failed: ${err instanceof Error ? err.message : String(err)}`
+      }
     }
   })
 
@@ -1526,79 +1739,359 @@ app.whenReady().then(() => {
           properties: ['openFile'],
           filters: [{ name: 'JSON', extensions: ['json'] }]
         })
-        if (result.canceled || result.filePaths.length === 0) {
+        if (result.canceled || result.filePaths.length === 0)
           return { ok: false, error: 'Cancelled.' }
-        }
         const filePath = result.filePaths[0]
-
-        // Parse and validate — do NOT write yet (renderer previews first)
         let raw: unknown
         try {
           raw = JSON.parse(readFileSync(filePath, 'utf-8'))
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          return { ok: false, error: `Could not parse file: ${msg}` }
+          return {
+            ok: false,
+            error: `Could not parse file: ${err instanceof Error ? err.message : String(err)}`
+          }
         }
-
-        if (!Array.isArray(raw)) {
-          return { ok: false, error: 'File must contain a JSON array.' }
-        }
-
-        const games: Game[] = []
-        const warnings: string[] = []
+        if (!Array.isArray(raw)) return { ok: false, error: 'File must contain a JSON array.' }
+        const games: Game[] = [],
+          warnings: string[] = []
         ;(raw as RawGame[]).forEach((entry, i) => {
           const r = validateEntry(entry, i)
           if (typeof r === 'string') warnings.push(r)
           else games.push(r)
         })
-
-        const entries = await Promise.all(games.map(toEntry))
-        return { ok: true, filePath, games: entries, warnings }
+        return { ok: true, filePath, games: await Promise.all(games.map(toEntry)), warnings }
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        return { ok: false, error: `Import failed: ${msg}` }
+        return {
+          ok: false,
+          error: `Import failed: ${err instanceof Error ? err.message : String(err)}`
+        }
       }
     }
   )
 
   ipcMain.handle('games:import-confirm', (_e, filePath: unknown): LaunchResult => {
-    // Validate the path parameter — never trust the renderer's cached parse
-    if (typeof filePath !== 'string' || !filePath.trim()) {
+    if (typeof filePath !== 'string' || !filePath.trim())
       return { ok: false, error: 'Invalid file path.' }
-    }
-    if (!isAbsolute(filePath)) {
-      return { ok: false, error: 'File path must be absolute.' }
-    }
-    if (!existsSync(filePath)) {
-      return { ok: false, error: 'File no longer exists.' }
-    }
+    if (!isAbsolute(filePath)) return { ok: false, error: 'File path must be absolute.' }
+    if (!existsSync(filePath)) return { ok: false, error: 'File no longer exists.' }
     try {
       let raw: unknown
       try {
         raw = JSON.parse(readFileSync(filePath, 'utf-8'))
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        return { ok: false, error: `Could not parse file: ${msg}` }
+        return {
+          ok: false,
+          error: `Could not parse file: ${err instanceof Error ? err.message : String(err)}`
+        }
       }
-
-      if (!Array.isArray(raw)) {
-        return { ok: false, error: 'File must contain a JSON array.' }
-      }
-
-      // Re-validate every entry
-      const games: Game[] = []
-      const warnings: string[] = []
+      if (!Array.isArray(raw)) return { ok: false, error: 'File must contain a JSON array.' }
+      const games: Game[] = [],
+        warnings: string[] = []
       ;(raw as RawGame[]).forEach((entry, i) => {
         const r = validateEntry(entry, i)
         if (typeof r === 'string') warnings.push(r)
         else games.push(r)
       })
-
+      void warnings
       saveGames(games)
       return { ok: true }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return { ok: false, error: `Could not import library: ${msg}` }
+      return {
+        ok: false,
+        error: `Could not import library: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+  })
+
+  // ── Firebase Auth ─────────────────────────────────────────────────────────
+
+  ipcMain.handle(
+    'auth:sign-in',
+    async (_e, payload: unknown): Promise<{ ok: boolean; user?: AuthUser; error?: string }> => {
+      if (typeof payload !== 'object' || payload === null)
+        return { ok: false, error: 'Invalid payload.' }
+      const p = payload as Record<string, unknown>
+      if (typeof p.email !== 'string' || typeof p.password !== 'string')
+        return { ok: false, error: 'Email and password are required.' }
+
+      const settings = loadSettings()
+      if (!settings.firebase?.apiKey)
+        return {
+          ok: false,
+          error: 'Firebase is not configured. Add your Firebase config in Settings.'
+        }
+
+      try {
+        const { status, data } = await firebaseRequest(
+          `${FB_AUTH_BASE}/accounts:signInWithPassword?key=${settings.firebase.apiKey}`,
+          { email: p.email, password: p.password, returnSecureToken: true }
+        )
+        if (status !== 200) {
+          const d = data as Record<string, unknown>
+          const msg = (d?.error as Record<string, unknown>)?.message
+          return {
+            ok: false,
+            error:
+              typeof msg === 'string' ? msg.replace(/_/g, ' ').toLowerCase() : 'Sign-in failed.'
+          }
+        }
+        const d = data as Record<string, unknown>
+        if (
+          typeof d.idToken !== 'string' ||
+          typeof d.refreshToken !== 'string' ||
+          typeof d.localId !== 'string'
+        )
+          return { ok: false, error: 'Unexpected response from Firebase.' }
+
+        const expiresIn = typeof d.expiresIn === 'string' ? parseInt(d.expiresIn, 10) : 3600
+        const auth: AuthState = {
+          idToken: d.idToken,
+          refreshToken: d.refreshToken,
+          uid: d.localId,
+          email: p.email,
+          expiresAt: Date.now() + expiresIn * 1000 - 60_000
+        }
+        saveSettings({ auth })
+        return { ok: true, user: { uid: auth.uid, email: auth.email } }
+      } catch (err) {
+        return {
+          ok: false,
+          error: `Sign-in failed: ${err instanceof Error ? err.message : String(err)}`
+        }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'auth:sign-up',
+    async (_e, payload: unknown): Promise<{ ok: boolean; user?: AuthUser; error?: string }> => {
+      if (typeof payload !== 'object' || payload === null)
+        return { ok: false, error: 'Invalid payload.' }
+      const p = payload as Record<string, unknown>
+      if (typeof p.email !== 'string' || typeof p.password !== 'string')
+        return { ok: false, error: 'Email and password are required.' }
+
+      const settings = loadSettings()
+      if (!settings.firebase?.apiKey)
+        return {
+          ok: false,
+          error: 'Firebase is not configured. Add your Firebase config in Settings.'
+        }
+
+      try {
+        const { status, data } = await firebaseRequest(
+          `${FB_AUTH_BASE}/accounts:signUp?key=${settings.firebase.apiKey}`,
+          { email: p.email, password: p.password, returnSecureToken: true }
+        )
+        if (status !== 200) {
+          const d = data as Record<string, unknown>
+          const msg = (d?.error as Record<string, unknown>)?.message
+          return {
+            ok: false,
+            error:
+              typeof msg === 'string' ? msg.replace(/_/g, ' ').toLowerCase() : 'Sign-up failed.'
+          }
+        }
+        const d = data as Record<string, unknown>
+        if (
+          typeof d.idToken !== 'string' ||
+          typeof d.refreshToken !== 'string' ||
+          typeof d.localId !== 'string'
+        )
+          return { ok: false, error: 'Unexpected response from Firebase.' }
+
+        const expiresIn = typeof d.expiresIn === 'string' ? parseInt(d.expiresIn, 10) : 3600
+        const auth: AuthState = {
+          idToken: d.idToken,
+          refreshToken: d.refreshToken,
+          uid: d.localId,
+          email: p.email,
+          expiresAt: Date.now() + expiresIn * 1000 - 60_000
+        }
+        saveSettings({ auth })
+        return { ok: true, user: { uid: auth.uid, email: auth.email } }
+      } catch (err) {
+        return {
+          ok: false,
+          error: `Sign-up failed: ${err instanceof Error ? err.message : String(err)}`
+        }
+      }
+    }
+  )
+
+  ipcMain.handle('auth:sign-out', (): LaunchResult => {
+    try {
+      const current = loadSettings()
+      // Remove auth state without touching other settings
+      const { auth: _, ...rest } = current
+      void _
+      writeFileSync(settingsFile(), JSON.stringify(rest, null, 2), 'utf-8')
+      return { ok: true }
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Sign-out failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+  })
+
+  ipcMain.handle('auth:get-user', (): AuthUser | null => {
+    const { auth } = loadSettings()
+    if (!auth) return null
+    return { uid: auth.uid, email: auth.email }
+  })
+
+  // ── Cloud sync (Firestore) ─────────────────────────────────────────────────
+
+  ipcMain.handle('cloud:sync-profile', async (): Promise<LaunchResult> => {
+    const token = await getValidToken()
+    if (!token) return { ok: false, error: 'Not signed in.' }
+
+    const settings = loadSettings()
+    if (!settings.firebase?.projectId)
+      return { ok: false, error: 'Firebase project not configured.' }
+
+    const { uid } = settings.auth!
+    const { games } = loadGames()
+    const playtime = loadPlaytime()
+
+    // Build a Firestore-safe profile document
+    const profile: Record<string, unknown> = {
+      updatedAt: new Date().toISOString(),
+      gameCount: games.length,
+      gameIds: games.map((g) => g.id),
+      playtime: JSON.stringify(playtime),
+      settings: JSON.stringify({
+        minimizeOnLaunch: settings.minimizeOnLaunch,
+        autoBackupSaves: settings.autoBackupSaves
+      })
+    }
+
+    // Sync games metadata (names, colors, tags, notes — no paths)
+    const gamesData: Record<string, unknown> = {}
+    for (const g of games) {
+      gamesData[g.id] = {
+        name: g.name,
+        color: g.color ?? '',
+        tags: JSON.stringify(g.tags ?? []),
+        notes: g.notes ?? '',
+        uri: g.uri ?? ''
+      }
+    }
+    profile.games = JSON.stringify(gamesData)
+
+    const ok = await firestoreWrite(
+      settings.firebase.projectId,
+      `users/${uid}/profile/data`,
+      profile,
+      token
+    )
+    return ok
+      ? { ok: true }
+      : { ok: false, error: 'Firestore write failed. Check your Firebase config.' }
+  })
+
+  // ── Save backup / restore ─────────────────────────────────────────────────
+
+  async function uploadSaveZip(
+    gameId: string,
+    zipPath: string,
+    token: string,
+    firebase: FirebaseConfig
+  ): Promise<boolean> {
+    if (!existsSync(zipPath)) return false
+    try {
+      const zipData = readFileSync(zipPath)
+      const encodedPath = encodeURIComponent(
+        `saves/${firebase.storageBucket.split('.')[0]}/${gameId}/latest.zip`
+      )
+      const uploadUrl = `https://firebasestorage.googleapis.com/v0/b/${firebase.storageBucket}/o?uploadType=media&name=${encodedPath}`
+      const { status } = await netFetchBinary(uploadUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/zip'
+        },
+        body: zipData.toString('binary')
+      })
+      return status >= 200 && status < 300
+    } catch {
+      return false
+    }
+  }
+
+  ipcMain.handle('save:backup', async (_e, id: unknown): Promise<LaunchResult> => {
+    if (typeof id !== 'string' || !id.trim()) return { ok: false, error: 'Invalid game id.' }
+
+    const token = await getValidToken()
+    if (!token) return { ok: false, error: 'Not signed in. Sign in to back up saves to the cloud.' }
+
+    const settings = loadSettings()
+    if (!settings.firebase) return { ok: false, error: 'Firebase is not configured.' }
+
+    const { games } = loadGames()
+    const game = games.find((g) => g.id === id)
+    if (!game) return { ok: false, error: `Game "${id}" not found.` }
+    if (!game.savePath)
+      return {
+        ok: false,
+        error: `"${game.name}" has no save folder set. Edit the game to add one.`
+      }
+    if (!existsSync(game.savePath))
+      return {
+        ok: false,
+        error: `Save folder not found: "${game.savePath}". Check the path is correct.`
+      }
+
+    const zipPath = join(savesDir(), `${game.id}-backup.zip`)
+    const zipped = await zipFolder(game.savePath, zipPath)
+    if (!zipped.ok) return { ok: false, error: `Could not zip save folder: ${zipped.error}` }
+
+    const uploaded = await uploadSaveZip(game.id, zipPath, token, settings.firebase)
+    return uploaded
+      ? { ok: true }
+      : {
+          ok: false,
+          error: 'Upload to Firebase Storage failed. Check your connection and Firebase config.'
+        }
+  })
+
+  ipcMain.handle('save:restore', async (_e, id: unknown): Promise<LaunchResult> => {
+    if (typeof id !== 'string' || !id.trim()) return { ok: false, error: 'Invalid game id.' }
+
+    const token = await getValidToken()
+    if (!token) return { ok: false, error: 'Not signed in.' }
+
+    const settings = loadSettings()
+    if (!settings.firebase) return { ok: false, error: 'Firebase is not configured.' }
+
+    const { games } = loadGames()
+    const game = games.find((g) => g.id === id)
+    if (!game) return { ok: false, error: `Game "${id}" not found.` }
+    if (!game.savePath) return { ok: false, error: `"${game.name}" has no save folder set.` }
+
+    try {
+      const encodedPath = encodeURIComponent(
+        `saves/${settings.firebase.storageBucket.split('.')[0]}/${game.id}/latest.zip`
+      )
+      const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${settings.firebase.storageBucket}/o/${encodedPath}?alt=media`
+      const { status, body } = await netFetchBinary(downloadUrl, {
+        headers: { Authorization: `Bearer ${token}` }
+      })
+      if (status !== 200) return { ok: false, error: `No cloud backup found for "${game.name}".` }
+
+      const zipPath = join(savesDir(), `${game.id}-restore.zip`)
+      writeFileSync(zipPath, body)
+
+      const extracted = await unzipToFolder(zipPath, game.savePath)
+      return extracted.ok
+        ? { ok: true }
+        : { ok: false, error: `Could not extract save files: ${extracted.error}` }
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Restore failed: ${err instanceof Error ? err.message : String(err)}`
+      }
     }
   })
 

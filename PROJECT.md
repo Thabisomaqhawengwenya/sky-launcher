@@ -180,6 +180,55 @@ LibraryStatus = { ok, games: GameEntry[], error?, warnings: string[] }
 Entries that fail are skipped (not shown, not launchable) and their reason appears
 in `LibraryStatus.warnings`.
 
+### Phase 8 — complete (backend)
+
+#### Firebase Auth
+
+| Method | Returns | Notes |
+|--------|---------|-------|
+| `authSignIn(email, password)` | `Promise<{ ok, user?, error? }>` | Signs in via Firebase Identity Toolkit REST. Stores `idToken`/`refreshToken` in `settings.json` only — never returned to renderer. |
+| `authSignUp(email, password)` | `Promise<{ ok, user?, error? }>` | Creates a new account. Same token storage model. |
+| `authSignOut()` | `Promise<LaunchResult>` | Removes auth state from `settings.json`. |
+| `getAuthUser()` | `Promise<AuthUser \| null>` | Returns `{ uid, email }` or null. No tokens. |
+
+Tokens are refreshed automatically before any cloud call using the Firebase securetoken endpoint. No Firebase SDK or new npm dependency — uses `net.request` already in the codebase.
+
+#### `savePath` on games
+
+- `Game` and `GameEntry` now support `savePath?: string` (absolute path, validated on write).
+- `GameEntry.hasSavePath: boolean` is the only save-path-related field the renderer ever sees — the raw path stays in main.
+- New picker: `pickSaveFolder()` opens a folder dialog titled for save-data selection.
+- `AddGameInput` and `EditGameInput` accept `savePath`.
+
+#### Cloud sync
+
+| Method | Returns | Notes |
+|--------|---------|-------|
+| `syncProfile()` | `Promise<LaunchResult>` | Writes games metadata (names, colours, tags, notes — no paths), playtime, and non-secret settings to `users/{uid}/profile/data` in Firestore. Requires sign-in + Firebase config. |
+| `backupGameSave(id)` | `Promise<LaunchResult>` | Zips `savePath` via PowerShell `Compress-Archive`, uploads zip to Firebase Storage at `users/{uid}/saves/{id}/latest.zip`. |
+| `restoreGameSave(id)` | `Promise<LaunchResult>` | Downloads the latest zip from Storage, extracts it over `savePath` via `Expand-Archive`. |
+
+Auto-backup on game exit is triggered when `settings.autoBackupSaves = true` and the game has a `savePath`.
+
+#### New settings fields
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `autoBackupSaves` | `boolean` | Triggers save backup on exe game exit. |
+| `firebase.apiKey` | `string` | Firebase Web API key. |
+| `firebase.projectId` | `string` | Firebase project id. |
+| `firebase.storageBucket` | `string` | Firebase Storage bucket (e.g. `myapp.appspot.com`). |
+
+Auth tokens (`idToken`, `refreshToken`) are stored in `settings.json` but are **never returned** by `getSettings()` — the handler strips the `auth` key before sending to the renderer.
+
+#### New type
+
+```ts
+AuthUser = { uid: string, email: string }
+```
+
+---
+
 ## Requests
 
 - **From Antigravity → Kiro (Phase 8: User Accounts & Cloud Saves via Firebase):**
